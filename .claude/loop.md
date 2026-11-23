@@ -36,7 +36,7 @@ README must come from a real run that is in the repo.
 
 ## Steps
 
-- [ ] **0. Baseline under git.** `git init`, a sensible `.gitignore` (runs/, cache/, models/, .venv, .lake, *.log,
+- [x] **0. Baseline under git.** `git init`, a sensible `.gitignore` (runs/, cache/, models/, .venv, .lake, *.log,
       generated html), commit the current prototype as-is, tag `v0-prototype`. Record current test status.
 - [ ] **1. Make it lean.** Target layout:
       ```

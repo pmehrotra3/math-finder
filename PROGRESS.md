@@ -590,3 +590,14 @@ Verified: `uv run pytest -q tests/test_bench.py` → `5 passed in 32.25s` (incl.
   (The 6 deselected are the `llm` tests that call the real model; each was run on its own when its milestone was built.)
 
 ## ALL MILESTONES (M0–M13) DONE AND VERIFIED — the loop can be stopped (cron job 61ff8dc4).
+
+---
+# Productionization loop (see .claude/loop.md)
+
+### 2026-11-22 — Step 0: baseline under git
+- `git init -b main`; extended .gitignore (*.log, lean_env/.lake/, .claude/settings.local.json, scheduler lock).
+- lean_env/ had an empty nested repo from `lake new` (no commits); moved it aside to the session scratchpad so the root repo can track lean_env/.
+- Committed the prototype as-is (125 files, .git 1.3 MB), tagged `v0-prototype`.
+- Verified: `uv run pytest -q -m "not lean and not llm"` → `1 failed, 86 passed, 31 deselected in 0.84s`
+  (failure: tests/test_guide.py — guide.html stale; the guide is removed in step 1).
+- Next: step 1 (make it lean).
