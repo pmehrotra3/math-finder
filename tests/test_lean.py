@@ -1,12 +1,14 @@
 """Tests for mathfinder/lean.py.
 
-The ones marked `lean` really run Lean (about 25 seconds each).
-Skip them with:  uv run pytest -m "not lean"
+The ones marked `lean` really run Lean. The first one waits ~30 s for a REPL to load
+Mathlib; after that each check takes well under a second.
+Skip them with:  uv run pytest -m "not lean and not llm"
 """
 
 import pytest
 
 from mathfinder.lean import (
+    HEADER,
     Decl,
     check_decls,
     indent,
@@ -41,13 +43,26 @@ def test_render_with_context_uses_its_own_namespace():
     )
 
 
-def test_parse_messages_reads_lean_json():
-    line = (
-        '{"caption":"","data":"declaration uses `sorry`","fileName":"x.lean",'
-        '"kind":"hasSorry","pos":{"column":8,"line":14},"severity":"warning"}'
-    )
-    [msg] = parse_messages("some non-json noise\n" + line)
-    assert (msg.line, msg.severity, msg.kind) == (14, "warning", "hasSorry")
+def test_parse_messages_reads_a_repl_reply():
+    reply = {
+        "messages": [
+            {"severity": "warning", "pos": {"line": 2, "column": 0}, "data": "declaration uses `sorry`"},
+            {"severity": "info", "pos": {"line": 3, "column": 2}, "data": "Try this: simp"},
+        ],
+        "env": 3,
+    }
+    msgs = parse_messages(reply, offset=6)
+    assert [(m.line, m.severity, m.kind) for m in msgs] == [(8, "warning", "hasSorry"), (9, "information", "")]
+
+
+def test_parse_messages_reports_a_rejected_command():
+    [msg] = parse_messages({"message": "Could not parse JSON"})
+    assert (msg.line, msg.severity) == (0, "error")
+
+
+def test_run_lean_requires_the_preloaded_header():
+    with pytest.raises(ValueError):
+        run_lean("example : True := trivial\n")
 
 
 # ---------- slow tests: these run Lean ----------
@@ -137,6 +152,15 @@ def test_verify_final_rejects_custom_axiom():
 
 
 @pytest.mark.lean
-def test_run_lean_timeout_is_reported():
-    out = run_lean("import Mathlib\n", timeout=1)
+def test_checks_cannot_see_each_others_theorems():
+    run_lean(HEADER + "theorem mf_leak : True := trivial\n")
+    out = run_lean(HEADER + "example : True := mf_leak\n")
+    assert any(m.severity == "error" for m in out.messages)
+
+
+@pytest.mark.lean
+def test_timeout_is_reported_and_the_next_check_still_works():
+    run_lean(HEADER)  # make sure a REPL is already up, so the timeout isn't spent loading Mathlib
+    out = run_lean(HEADER + "partial def mf_spin (n : Nat) : Nat := mf_spin (n + 1)\n\n#eval mf_spin 0\n", timeout=2)
     assert out.timed_out
+    assert statement_errors("(n : ℕ) : n + 0 = n") == []  # a fresh REPL replaced the stuck one

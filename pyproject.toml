@@ -28,7 +28,7 @@ testpaths = ["tests"]
 pythonpath = ["."]  # so tests can `import server.app` from the project root
 markers = [
     "llm: calls a real LLM (slow, uses quota). Run with: pytest -m llm",
-    "lean: runs Lean (about 25 s each). Skip with: pytest -m 'not lean'",
+    "lean: runs Lean (first one waits for a REPL to load Mathlib). Skip with: pytest -m 'not lean and not llm'",
 ]
 addopts = "-m 'not llm'"
 

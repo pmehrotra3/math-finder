@@ -40,3 +40,17 @@ The original 18-iteration prototype log (M0–M13) is in git: `git show v0-proto
   → `4 passed, 23 deselected in 135.66s`.
 - Size: 94 files changed, −21.3k lines (mostly the generated guide); mathfinder/ + server/ = 2,122 lines.
 - Next: step 2 (persistent Lean REPL).
+
+### 2026-11-23 — Step 2: fast Lean (persistent REPL)
+- `lean_env/lakefile.toml` requires leanprover-community/repl @ v4.36.0-rc2 (matches toolchain; `lake update REPL`
+  left the Mathlib rev untouched). Build once: `cd lean_env && lake build repl`.
+- `mathfinder/lean.py`: `run_lean` now sends the code (minus HEADER) to a pool of REPLs that loaded Mathlib + HEADER
+  once; every check runs on that same clean env, so checks stay isolated. Line numbers are shifted back so
+  `check_decls`/`verify_final` are unchanged. Timeout or crash → that REPL is killed and replaced. Recycled after
+  `MATHFINDER_LEAN_RECYCLE` (300) checks; pool size `MATHFINDER_LEAN_WORKERS` (2).
+- REPL format quirks: severity "info" (→ "information"); sorry has no `kind`, detected from "declaration uses `sorry`".
+- Measured (warm disk cache): old `lake env lean` per check 2.6–3.0 s; REPL startup 2.3 s warm (32 s right after the
+  Mathlib cache refresh); 5-candidate batch median 20 ms, p95 27 ms; RSS 7.46 GB → 7.71 GB after 300 checks (~0.8 MB/check).
+- Tests: new parse/header/isolation/timeout-recovery tests. `uv run pytest -q -m "not lean and not llm"` → `79 passed, 32 deselected in 0.91s`;
+  `uv run pytest -q -m "not llm"` → `105 passed, 6 deselected in 35.45s` (prototype: 112 passed in 1040.56s).
+- Next: step 3 (safe to host).

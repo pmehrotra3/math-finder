@@ -54,7 +54,7 @@ README must come from a real run that is in the repo.
         are out of scope for the product: move them to a `archive/` branch (git branch, not folder) and delete from main.
       - Add `ruff` (lint + format) to dev deps, fix all findings. Add type hints on public functions.
       - All config via env vars, documented in one `.env.example`.
-- [ ] **2. Fast Lean.** Replace per-check `lake env lean` (20–60 s Mathlib load each time) with a persistent
+- [x] **2. Fast Lean.** Replace per-check `lake env lean` (20–60 s Mathlib load each time) with a persistent
       Lean REPL process (leanprover-community/repl, pinned to the same toolchain) that imports Mathlib once and
       checks many snippets. Keep a pool of 1–N workers (N from env, default 2 to fit RAM). Restart a worker on
       crash/timeout. Measure and log before/after time per check.

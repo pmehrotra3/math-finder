@@ -3,7 +3,6 @@ cache_get.log
 .claude/settings.local.json
 data/
 lean_env/.lake/
-lean_env/.mf_tmp/
 *.log
 models/
 *.pyc
