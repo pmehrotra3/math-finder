@@ -1,0 +1,32 @@
+[project]
+name = "mathfinder"
+version = "0.1.0"
+description = "Collaborative AI theorem prover: LaTeX in, verified Lean proof out."
+requires-python = ">=3.13"
+dependencies = [
+    "anthropic>=0.121",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27",
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["mathfinder"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]  # so tests can `import server.app` from the project root
+markers = [
+    "llm: calls a real LLM (slow, uses quota). Run with: pytest -m llm",
+    "lean: runs Lean (about 25 s each). Skip with: pytest -m 'not lean'",
+]
+addopts = "-m 'not llm'"

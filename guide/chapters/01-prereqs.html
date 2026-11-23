@@ -1,0 +1,85 @@
+<section id="ch0" data-title="0. Prerequisites">
+<h2>Chapter 0: Prerequisites</h2>
+<p class="why"><strong>What and why.</strong> You need three things: <strong>Lean</strong> (the proof checker),
+<strong>Mathlib</strong> (Lean's huge library of already-proved math), and <strong>Python</strong> tooling to run the
+search engine. You also need a way to talk to Claude: either the <code>claude</code> command line tool or an API key.</p>
+
+<ol class="steps">
+<li class="step">
+<p>Install Homebrew (the Mac package manager) if <code>brew --version</code> doesn't print a version.
+Follow the one-line install on <a href="https://brew.sh">brew.sh</a>, then open a new terminal.</p>
+<pre><code>brew --version</code></pre>
+</li>
+
+<li class="step">
+<p>Install <code>elan</code>, the Lean version manager. It downloads the right Lean version for each project automatically.</p>
+<pre><code>brew install elan-init</code></pre>
+<p class="explain">This gives you three commands: <strong>elan</strong> (manages Lean versions), <strong>lean</strong>
+(the checker) and <strong>lake</strong> (Lean's build tool, like <code>npm</code> or <code>cargo</code>).</p>
+</li>
+
+<li class="step">
+<p>Install <code>uv</code>, a fast Python project manager.</p>
+<pre><code>brew install uv</code></pre>
+<p class="explain">uv creates an isolated Python environment (<code>.venv</code>) per project and installs packages into it, so this project can't break your other Python code.</p>
+</li>
+
+<li class="step">
+<p>Make sure you can talk to Claude. Option A: the Claude Code CLI (uses your Claude subscription, no key needed):</p>
+<pre><code>claude --version</code></pre>
+<p>Option B: an API key from <a href="https://platform.claude.com">platform.claude.com</a>, set in your terminal only (never in a file you share):</p>
+<pre><code>export ANTHROPIC_API_KEY="sk-ant-..."</code></pre>
+</li>
+
+<li class="step">
+<p>Create the project folder and go into it.</p>
+<pre><code>mkdir -p ~/Desktop/math_proofs
+cd ~/Desktop/math_proofs</code></pre>
+</li>
+
+<li class="step">
+<p>Create a Lean project that uses Mathlib. The <code>+leanprover-community/mathlib4:lean-toolchain</code> part means
+"use the Lean version Mathlib currently needs".</p>
+<pre><code>lake +leanprover-community/mathlib4:lean-toolchain new lean_env math</code></pre>
+<p class="explain">This creates <code>lean_env/</code> with <code>lakefile.toml</code> (declares the Mathlib dependency)
+and <code>lean-toolchain</code> (pins the Lean version, here <code>v4.36.0-rc2</code>).</p>
+</li>
+
+<li class="step">
+<p>Download Mathlib's prebuilt files. Compiling Mathlib yourself takes hours; this downloads it (several GB) instead.</p>
+<pre><code>cd lean_env
+lake exe cache get
+cd ..</code></pre>
+</li>
+
+<li class="step">
+<p>Create the empty folders the project will fill in.</p>
+<pre><code>mkdir -p mathfinder tests server web guide/chapters tools</code></pre>
+</li>
+</ol>
+
+<div class="checkpoint">
+<h3>Checkpoint</h3>
+<p>Prove something real. Create a scratch file and check it:</p>
+<pre><code>cd lean_env
+mkdir -p .mf_tmp
+printf 'import Mathlib\n\nexample (a b : ℝ) : a ^ 2 + b ^ 2 ≥ 2 * a * b := by\n  nlinarith [sq_nonneg (a - b)]\n\n#eval 2 + 2\n' > .mf_tmp/hello.lean
+lake env lean --json .mf_tmp/hello.lean
+cd ..</code></pre>
+<p>You should see exactly one message, the output of <code>#eval</code>, and <strong>no errors</strong>:</p>
+<pre><code>{"caption":"","data":"4", ... "severity":"information"}</code></pre>
+<p class="explain"><strong>What happened:</strong> <code>example ... := by nlinarith [sq_nonneg (a - b)]</code> states
+a² + b² ≥ 2ab for real numbers and proves it. The hint <code>sq_nonneg (a - b)</code> says "(a−b)² ≥ 0", and
+<code>nlinarith</code> (nonlinear arithmetic) finishes it. No output about the theorem means Lean accepted the proof.
+<code>--json</code> makes Lean print messages as JSON, which our Python code will read in M1.</p>
+<p class="explain">The first run can take a minute or more while your Mac loads Mathlib from disk. Later runs take about 20 seconds.</p>
+</div>
+<div class="errors">
+<h3>Common errors</h3>
+<ul>
+<li><code>unknown module prefix 'Mathlib'</code>: you're not inside <code>lean_env</code>, or you ran <code>lean</code> instead of <code>lake env lean</code>.</li>
+<li>It takes many minutes and your CPU is at 100%: the cache download didn't finish and Lean is compiling Mathlib. Stop it (Ctrl-C) and rerun <code>lake exe cache get</code>.</li>
+<li><code>command not found: lake</code>: open a new terminal after <code>brew install elan-init</code>.</li>
+</ul>
+</div>
+</section>

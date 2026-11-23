@@ -1,0 +1,11 @@
+<section id="next" data-title="What's next">
+<h2>What's next</h2>
+<p>All fourteen milestones are built and verified. <code>PROGRESS.md</code> has the full log, including every verification command and its output.
+Ideas for going further, each a project of its own:</p>
+<ul>
+<li><strong>Harder benchmark</strong>: add real miniF2F problems to <code>bench/problems.jsonl</code>. The current set is solved 20/20, so it can no longer show improvement.</li>
+<li><strong>Faster Lean</strong>: keep Mathlib loaded in a persistent Lean process (the Lean REPL) instead of starting Lean for every batch. Most of the time spent is loading Mathlib.</li>
+<li><strong>Use your trained model</strong>: serve the LoRA adapter from M13 and add it as a third backend in <code>llm.BACKENDS</code>.</li>
+<li><strong>A value model in the search</strong>: train a classifier on <code>value.jsonl</code> and use it to order plans, instead of "fewest lemmas first".</li>
+</ul>
+</section>

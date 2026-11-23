@@ -1,0 +1,104 @@
+<section id="m2" data-title="M2. Hammer">
+<h2>M2: The hammer (no AI needed)</h2>
+<p class="why"><strong>What and why.</strong> Many small lemmas fall to a single automatic tactic. Asking an LLM costs
+seconds and money; one Lean run that tries a dozen tactics at once costs nothing. So the <strong>hammer</strong> always goes
+first. In the same Lean run it also asks <code>plausible</code> to test the statement on random values. If it finds values
+that make the statement false, the search drops that lemma immediately and tells the planner why.</p>
+
+<h3>The tactics we try</h3>
+<table>
+<tr><th>Tactic</th><th>Good at</th></tr>
+<tr><td><code>norm_num</code></td><td>arithmetic with concrete numbers: <code>2 ^ 10 = 1024</code></td></tr>
+<tr><td><code>simp</code></td><td>rewriting with hundreds of known simplification facts: <code>n + 0 = n</code></td></tr>
+<tr><td><code>omega</code></td><td>linear facts about integers / naturals: <code>n &lt; m → n + 1 ≤ m</code></td></tr>
+<tr><td><code>decide</code></td><td>small statements Lean can just compute: <code>Nat.Prime 97</code></td></tr>
+<tr><td><code>linarith</code> / <code>nlinarith</code></td><td>linear / nonlinear inequalities over ordered fields such as ℝ</td></tr>
+<tr><td><code>positivity</code></td><td>goals like <code>0 &lt; x ^ 2 + 1</code></td></tr>
+<tr><td><code>ring_nf</code>, <code>field_simp</code></td><td>algebraic identities, clearing denominators</td></tr>
+<tr><td><code>aesop</code>, <code>tauto</code>, <code>simp_all</code></td><td>logic puzzles and "use the hypotheses" goals</td></tr>
+<tr><td><code>norm_num &lt;;&gt; nlinarith</code></td><td><code>&lt;;&gt;</code> means "then run the next tactic on <em>every</em> goal that's left"</td></tr>
+<tr><td><code>exact?</code></td><td>searches all of Mathlib for one lemma that closes the goal</td></tr>
+</table>
+
+<ol class="steps">
+<li class="step">
+<p>Fix a soundness bug in the checker and keep Lean's info messages. Replace the whole file:</p>
+{{file:mathfinder/lean.py@m2}}
+<p class="explain"><strong>What changed and why:</strong> candidates are now written as <code>example</code> instead of
+<code>theorem name</code>. The hammer test caught this: <code>exact?</code> "proved" a false-looking goal by citing
+<code>mf_hammer_0</code>, an <em>earlier candidate in the same file that had failed</em>. Lean still adds a failed theorem to the
+file's environment (as if it were proved by sorry), so later candidates could cite it. An <code>example</code> is checked but
+never added to the environment, so nothing can cite it. The <code>-- name</code> comment line keeps the file readable when you debug it.</p>
+<p class="explain">Second change: <code>DeclResult</code> gets an <code>infos</code> list holding Lean's "information" messages.
+We need them because <code>exact?</code> reports the lemma it found that way.</p>
+</li>
+
+<li class="step">
+<p>Update the checker tests to match. Replace the whole file:</p>
+{{file:tests/test_lean.py@m2}}
+<p class="explain"><strong>What changed:</strong> <code>test_render_...</code> now expects <code>example</code> and the
+<code>-- t</code> comment, and the new <code>test_candidates_cannot_cite_each_other</code> guards the bug fixed above.</p>
+</li>
+
+<li class="step">
+<p>Create the hammer.</p>
+{{file:mathfinder/hammer.py}}
+<p class="explain"><strong>One Lean run for everything:</strong> <code>hammer</code> builds one candidate per tactic plus one
+<code>plausible</code> candidate, and hands them all to <code>check_decls</code> from M1. The first tactic in the list that
+worked wins, and since the list goes from fast to slow, the proof we keep is a cheap one.</p>
+<p class="explain"><strong>Why less fuel</strong> (<code>HAMMER_HEARTBEATS = 100_000</code>): a tactic that is going to work
+almost always works quickly, and fifteen slow failures would make every hammer call slow.</p>
+<p class="explain"><strong>exact?</strong> prints <code>Try this: [apply] exact Nat.le_of_dvd hb h</code>. <code>suggestion</code>
+keeps just <code>exact Nat.le_of_dvd hb h</code>, so the saved proof is instant instead of re-running a library search.
+<code>str.removeprefix</code> removes a prefix only if it's there.</p>
+<p class="explain"><strong>plausible</strong> plugs random values into the statement. When it finds a failure, Lean reports
+an error containing <code>Found a counter-example!</code> and <code>counterexample_text</code> squeezes it into one line. It can only
+sample types it knows how to generate (like ℕ and ℤ). For ℝ it reports that it can't build a "testable" instance, which
+we record as <code>testable = False</code>. A missing counterexample means "not refuted", <em>never</em> "proved".</p>
+</li>
+
+<li class="step">
+<p>Create its tests.</p>
+{{file:tests/test_hammer.py}}
+<p class="explain">The three fast tests use <em>real</em> messages copied from Lean, so the parsers are tested against
+what Lean actually prints. <code>tactics=["exact?"]</code> restricts the hammer to one tactic, so we know the library-search path is exercised.</p>
+</li>
+
+<li class="step">
+<p>Run the fast tests:</p>
+<pre><code>uv run pytest -q -m "not lean"</code></pre>
+</li>
+
+<li class="step">
+<p>Run everything (a few minutes: each hammer call is one Lean run with 15 candidates):</p>
+<pre><code>uv run pytest -q</code></pre>
+</li>
+</ol>
+
+<div class="checkpoint">
+<h3>Checkpoint</h3>
+<p>Try the hammer by hand on a true and a false statement:</p>
+<pre><code>uv run python -c "
+from mathfinder.hammer import hammer
+print(hammer('(n : ℕ) (h : n > 3) : 2 * n &lt; n * n'))
+print(hammer('(n : ℕ) : n ^ 2 ≤ 2 * n + 3'))
+"</code></pre>
+<p>Expected (the counterexample value can differ because the testing is random):</p>
+<pre><code>HammerResult(proved=True, tactic='nlinarith', proof='nlinarith', counterexample='', testable=True)
+HammerResult(proved=False, tactic='', proof='', counterexample='n := 4; issue: 16 ≤ 11 does not hold', testable=True)</code></pre>
+<p>And the full suite:</p>
+<pre><code>uv run pytest -q</code></pre>
+<pre><code>.........................                                                [100%]
+25 passed in 177.00s (0:02:57)</code></pre>
+<p class="explain">The time varies a lot (2–4 minutes) with how warm your disk cache is. The count, 25, should match.</p>
+</div>
+<div class="errors">
+<h3>Common errors</h3>
+<ul>
+<li><code>test_hammer_finds_counterexample...</code> fails with <code>proved=True, tactic='exact?', proof='exact mf_hammer_0 ...'</code>:
+your <code>Decl.render</code> still writes <code>theorem</code>. Use <code>example</code> (step 1).</li>
+<li><code>unknown tactic 'plausible'</code>: your Mathlib is older than late 2024 (it used to be called <code>slim_check</code>). Recreate <code>lean_env</code> as in Chapter 0.</li>
+<li>The hammer takes minutes: a cold disk cache. The second run is much faster.</li>
+</ul>
+</div>
+</section>

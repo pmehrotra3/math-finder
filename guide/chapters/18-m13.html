@@ -1,0 +1,114 @@
+<section id="m13" data-title="M13. Training">
+<h2>M13: Training scaffolding</h2>
+<p class="why"><strong>What and why.</strong> Since M8 every run has been recorded, and <code>mathfinder export</code> turns the records into
+datasets. This last chapter prepares the ground for <strong>training your own prover</strong>: a small open model that learns from the
+proofs Math Finder found (and from the mistakes it made). That is how systems like AlphaProof improve: search produces proofs, the
+proofs train the model, and the better model searches better. We build the two missing pieces and test them for real on a laptop. We
+<em>don't</em> run serious training: that needs a GPU, hours, and far more data than a few dozen runs produce.</p>
+
+<h3>Three kinds of training data</h3>
+<table>
+<tr><th>File</th><th>Teaches</th><th>Method</th></tr>
+<tr><td><code>sft_chat.jsonl</code></td><td>"here's a goal, write this proof"</td><td><strong>SFT</strong>, supervised fine-tuning: imitate good examples</td></tr>
+<tr><td><code>dpo.jsonl</code></td><td>"for this goal, this proof is better than that one"</td><td><strong>DPO</strong>, direct preference optimization: learn from pairs</td></tr>
+<tr><td><code>value.jsonl</code></td><td>"will this lemma get proved?"</td><td>a classifier, a <strong>value model</strong> the search could use to try promising plans first</td></tr>
+</table>
+
+<ol class="steps">
+<li class="step">
+<p>Make <code>training/</code> a package (so tests can import it).</p>
+{{file:training/__init__.py}}
+</li>
+
+<li class="step">
+<p>Create the data preparation script.</p>
+{{file:training/prepare.py}}
+<p class="explain"><strong>Chat format.</strong> Modern models are trained on conversations: a list of <code>{"role", "content"}</code> messages
+(system, user, assistant). <strong>sft_rows</strong> builds one conversation per proved lemma, and the assistant's reply is the proof. The prompt looks
+like the one the prover uses in M4b, so a trained model would feel at home there. <strong>dpo_rows</strong> builds TRL's preference format: one
+prompt, a <code>chosen</code> reply and a <code>rejected</code> reply.</p>
+<p class="explain"><strong>The split by goal</strong> (<code>split_of</code>) is the important detail. If two proofs of the same lemma landed in
+<em>train</em> and <em>test</em>, the test would measure memory, not skill: that's a <em>leak</em>. So we hash the statement (SHA-256, a fingerprint
+that's always the same for the same text) and send about 10% of <em>statements</em> to test. <code>int(digest, 16) % 100</code> turns the
+hexadecimal fingerprint into a number from 0 to 99.</p>
+</li>
+
+<li class="step">
+<p>Create the fine-tuning script.</p>
+{{file:training/finetune.py}}
+<p class="explain"><strong>LoRA</strong> freezes the model and trains small extra matrices next to it. Instead of updating billions of numbers, you
+update a few million, which fits on one GPU, and the result is a small <em>adapter</em> file (19 MB for the tiny model). <code>target_modules="all-linear"</code>
+puts adapters next to every linear layer.</p>
+<p class="explain"><strong>SFTConfig</strong> holds the training settings. <code>gradient_accumulation_steps=8</code> adds up 8 small steps before
+updating, which behaves like a batch of 8 while only using the memory of 1. <code>max_steps</code> overrides the epochs, which is handy for smoke tests.
+The heavy libraries (<code>torch</code>, <code>transformers</code>, <code>datasets</code>, <code>peft</code>, <code>trl</code>) are imported
+<em>inside</em> <code>train()</code>, so <code>--dry-run</code> and the tests work without installing them.</p>
+</li>
+
+<li class="step">
+<p>Never commit trained models. Replace the whole file:</p>
+{{file:.gitignore}}
+<p class="explain"><strong>What changed:</strong> the last line, <code>models/</code>.</p>
+</li>
+
+<li class="step">
+<p>Create the tests.</p>
+{{file:tests/test_training.py}}
+<p class="explain"><code>test_prepare_keeps_each_goal_on_one_side</code> writes two proofs for each of 60 goals and checks no goal appears in both
+<em>train</em> and <em>test</em>, which is exactly the leak the split exists to prevent.</p>
+</li>
+
+<li class="step">
+<p>Build the datasets from all your runs, and check them:</p>
+<pre><code>uv run python -m mathfinder export
+uv run python training/prepare.py
+uv run python training/finetune.py --dry-run</code></pre>
+</li>
+
+<li class="step">
+<p>Optional: a real 2-step training run on a tiny model, on your CPU (about a minute; downloads ~300 MB of libraries and model the
+first time, into a temporary environment, so your project stays light):</p>
+<pre><code>uv run --with torch --with transformers --with datasets --with peft --with trl \
+    python training/finetune.py --base-model HuggingFaceTB/SmolLM2-135M-Instruct --max-steps 2 --out models/smoke-test</code></pre>
+<p class="explain"><code>uv run --with X</code> runs the command with extra packages available just for that run.</p>
+</li>
+</ol>
+
+<div class="checkpoint">
+<h3>Checkpoint</h3>
+<p>What we got (your counts depend on how many runs you've done):</p>
+<pre><code>sft             41 rows  -> .../data/sft.jsonl
+preferences     10 rows  -> .../data/preferences.jsonl
+value           10 rows  -> .../data/value.jsonl
+hints            2 rows  -> .../data/hints.jsonl
+train  sft_chat 15  dpo 10  value 10
+test   sft_chat 0  dpo 0  value 0
+15 examples, about 1030 tokens in total (1 token ≈ 4 characters)
+first example:
+  [system] 'You are an expert in Lean 4 and Mathlib. Write ONLY the tactic proof that goes after `:= by`. ...'
+  [user] 'Prove this lemma:\n  theorem goal (x : ℝ) (hx : 0 &lt; x) : x + 1 / x = (x * x + 1) / x'
+  [assistant] 'field_simp'
+...
+dry run: not training.</code></pre>
+<p class="explain">These counts include the 20 benchmark runs from M12. Before the fix in M12 (step 5), the same command found only 12 SFT rows and 3 preference pairs.</p>
+<p>And the 2-step smoke test (run on the earlier 6 examples) ended with (the loss numbers will differ slightly):</p>
+<pre><code>{'loss': '3.875', 'grad_norm': '1.089', 'learning_rate': '0.0002', ... 'epoch': '1'}
+{'loss': '3.829', 'grad_norm': '1.056', 'learning_rate': '0.0001', ... 'epoch': '2'}
+{'train_runtime': '9.374', ...}
+saved the LoRA adapter to models/smoke-test</code></pre>
+<p class="explain">With so few examples, <em>test</em> can easily be empty. The split is by goal, and with only a handful of goals none may
+fall in the 10%. Run the benchmark (M12) and a few more proofs to grow the data.</p>
+<pre><code>uv run pytest -q tests/test_training.py</code></pre>
+<pre><code>.....                                                                    [100%]
+5 passed in 0.03s</code></pre>
+</div>
+<div class="errors">
+<h3>Common errors</h3>
+<ul>
+<li><code>no training examples</code>: run <code>mathfinder export</code> and <code>training/prepare.py</code> first. Only lemma-level proofs become SFT
+examples, so runs proved by direct automation contribute none.</li>
+<li><code>Cannot use chat template functions ... no template</code>: the base model has no chat template. Use an "-Instruct" or "-Chat" model.</li>
+<li>Out of memory on a real model: lower <code>--lora-rank</code>, use a smaller model, or train on a GPU machine.</li>
+</ul>
+</div>
+</section>

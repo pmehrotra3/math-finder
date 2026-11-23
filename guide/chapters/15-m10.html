@@ -1,0 +1,126 @@
+<section id="m10" data-title="M10. The website">
+<h2>M10: The website</h2>
+<p class="why"><strong>What and why.</strong> Everything so far happens in a terminal. This chapter gives Math Finder a face: one web
+page that walks you through the whole story. <strong>(1)</strong> Type a theorem in LaTeX and see it typeset as you type.
+<strong>(2)</strong> Check and approve its Lean form (or edit it). <strong>(3)</strong> Watch the search live as a tree of plans and lemmas,
+colour-coded by status, with a chat panel next to it for hints and answers; click any lemma to hint about it, reject it, or pin its plan.
+<strong>(4)</strong> Read the result: the explanation with real maths typesetting, the verified Lean proof, and a few numbers about the search.</p>
+
+<h3>Three languages, one page</h3>
+<ul>
+<li><strong>HTML</strong> (<code>index.html</code>) is the structure: which boxes and buttons exist. Each important element has an
+<code>id</code>, so the code can find it.</li>
+<li><strong>CSS</strong> (<code>style.css</code>) is the look. Colours are defined once as <em>variables</em> (<code>--ok: #6fd39a</code>) and
+used everywhere (<code>var(--ok)</code>). A <em>class</em> like <code>.lemma.proved</code> styles every lemma that is proved.</li>
+<li><strong>JavaScript</strong> (<code>app.js</code>) is the behaviour: it reacts to clicks, talks to the server, and redraws the tree when events arrive.</li>
+</ul>
+<p>Two libraries are loaded from a CDN (a public file server), so the page needs an internet connection: <strong>KaTeX</strong> typesets
+<code>$...$</code> maths, and <strong>marked</strong> turns the Markdown explanation into HTML.</p>
+
+<ol class="steps">
+<li class="step">
+<p>Create the page's structure.</p>
+{{file:web/index.html@m10}}
+<p class="explain">The four <code>&lt;section&gt;</code>s are the four steps. All but the first start with <code>class="hidden"</code>, and
+the code removes that class when it's time to show them. <code>defer</code> on the scripts means "download now, run after the page is
+built", so <code>app.js</code> can safely look up elements by id.</p>
+</li>
+
+<li class="step">
+<p>Create the look.</p>
+{{file:web/style.css@m10}}
+<p class="explain"><code>display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr)</code> puts the tree and the chat side by side
+(60% / 40%), and the <code>@media (max-width: 900px)</code> rule stacks them on narrow screens. The lemma status symbols (○ ◐ ✓ ✗ …) come
+from CSS alone: <code>.lemma.proved::before { content: "✓ " }</code> inserts the symbol before the text, so the code only has to set the class.</p>
+</li>
+
+<li class="step">
+<p>Create the behaviour.</p>
+{{file:web/app.js@m10}}
+<p class="explain"><strong>post()</strong> sends JSON to the server with <code>fetch</code>. In JavaScript, <code>async</code>/<code>await</code>
+work just like in Python: <code>await fetch(...)</code> waits for the reply without freezing the page. If the server answers with an error
+code, <code>throw</code> raises an exception, the JavaScript version of Python's <code>raise</code>.</p>
+<p class="explain"><strong>renderMarkdown</strong> solves a real clash: Markdown treats <code>_</code> and <code>\</code> specially, which would
+corrupt LaTeX like <code>$a_1$</code>. So it swaps each maths piece for a placeholder (<code>@@MATH0@@</code>), lets marked convert the
+Markdown, puts the maths back, and only then lets KaTeX draw it.</p>
+<p class="explain"><strong>Safety:</strong> text from the model or from you is inserted with <code>textContent</code> (always shown as plain
+text) or escaped with <code>escapeHtml</code> before it goes into <code>innerHTML</code>. That way a stray <code>&lt;b&gt;</code> in a
+lemma, or in <code>a&lt;b</code> inside some maths, can't turn into real HTML.</p>
+<p class="explain"><strong>startWatching</strong> opens the WebSocket: <code>new WebSocket("ws://.../ws/" + id)</code>, with
+<code>ws.onmessage</code> called for every event. <strong>handleEvent</strong> is one big <code>switch</code> on the event kind that updates
+<code>state</code> (the plans, the current plan, the open question, counters), and then <strong>renderTree</strong> redraws the tree from
+<code>state</code>. Keeping all data in one <code>state</code> object and redrawing from it is simpler than editing the page piece by piece.
+Events with <code>depth &gt; 0</code> come from a sub-search and go into the chat log, not the main tree.</p>
+<p class="explain"><strong>The chat box</strong> sends whatever you type as a <em>hint</em>, unless the search has asked a question, in
+which case it's sent as the <em>answer</em>. The search can't wait for both at once, so the page keeps track of which one is wanted.</p>
+<p class="explain"><strong>runDemo</strong> replays recorded events from <code>demo_events.json</code> when you open the page with
+<code>#demo</code> at the end of the address. It's how you can work on the page's look without waiting for Lean or the model.</p>
+</li>
+
+<li class="step">
+<p>Serve the page from the server. Replace the whole file:</p>
+{{file:server/app.py@m10}}
+<p class="explain"><strong>What changed:</strong> two imports (<code>Path</code>, <code>StaticFiles</code>), <code>WEB_DIR</code>, and the last
+line, <code>app.mount("/", StaticFiles(directory=WEB_DIR, html=True))</code>. That serves every file in <code>web/</code>, and
+<code>html=True</code> makes <code>/</code> give <code>index.html</code>. It must come <em>after</em> all the routes, because FastAPI tries
+routes in order and a mount at <code>/</code> matches everything.</p>
+</li>
+
+<li class="step">
+<p>Test that the page is served and the API still works. Replace the whole file:</p>
+{{file:tests/test_server.py@m10}}
+<p class="explain"><strong>What changed:</strong> one new test at the end, <code>test_the_web_page_is_served</code>.</p>
+</li>
+
+<li class="step">
+<p>Create the demo tool.</p>
+{{file:tools/make_demo.py}}
+</li>
+
+<li class="step">
+<p>Make a demo from one of your real runs. Use any <code>runs/</code> folder whose trace came from the server (it ends with a
+<code>finished</code> event), for example one from the M9 checkpoint:</p>
+<pre><code>uv run python tools/make_demo.py runs/20261114-154643/trace.jsonl</code></pre>
+<pre><code>wrote 10 events to /Users/you/Desktop/math_proofs/web/demo_events.json</code></pre>
+</li>
+
+<li class="step">
+<p>Run the tests, then start the server:</p>
+<pre><code>uv run pytest -q -m "not lean and not llm"
+uv run uvicorn server.app:app --port 8765</code></pre>
+</li>
+
+<li class="step">
+<p>Open <a href="http://localhost:8765/#demo">http://localhost:8765/#demo</a> to see the replay, then
+<a href="http://localhost:8765/">http://localhost:8765/</a> and prove something for real.</p>
+</li>
+</ol>
+
+<div class="checkpoint">
+<h3>Checkpoint</h3>
+<p>At <code>http://localhost:8765/</code> you should see step 1 with your LaTeX typeset in the <em>Preview</em> box as you type.
+We then drove the real page (in a headless Chrome) through a whole proof:</p>
+<pre><code>typed:     For every real number $x$ and every natural number $n$: if $x \ge 0$ then $x^n \ge 0$.
+Formalize → (53 s) statement: (x : ℝ) (n : ℕ) (hx : 0 ≤ x) : 0 ≤ x ^ n
+            verdict: ✓ Same meaning: Both statements quantify over real x and natural n, assume x ≥ 0, ...
+Approve   → search view; typed the hint "positivity should do it", which appeared in the chat
+          → (73 s) "Proved, and verified by Lean", status: proved
+            theorem main (x : ℝ) (n : ℕ) (hx : 0 ≤ x) : 0 ≤ x ^ n := by
+              positivity</code></pre>
+<p>The <code>#demo</code> page shows the n²+n plan with its lemma ticked green (✓ <code>sq_add_self_eq_mul_succ</code>, "hammer:
+linarith"), the chat log, five metric tiles, the explanation with typeset maths, and the Lean proof.</p>
+<p>Fast tests:</p>
+<pre><code>.......................................................................  [100%]
+71 passed, 29 deselected in 1.47s</code></pre>
+</div>
+<div class="errors">
+<h3>Common errors</h3>
+<ul>
+<li>The page is unstyled, or maths shows as raw <code>$...$</code>: no internet, so the CDN files didn't load. Everything else still works.</li>
+<li><code>{"detail":"Not Found"}</code> at <code>/</code>: the <code>app.mount(...)</code> line is missing, or <code>web/index.html</code> isn't there.</li>
+<li>API calls return HTML instead of JSON: the mount comes <em>before</em> the routes. Move it to the very end of <code>app.py</code>.</li>
+<li>The tree never fills in: open the browser's developer console (⌥⌘J in Chrome). A red error there usually names the line in <code>app.js</code>.</li>
+<li><code>#demo</code> shows nothing: <code>web/demo_events.json</code> is missing. Run step 7.</li>
+</ul>
+</div>
+</section>

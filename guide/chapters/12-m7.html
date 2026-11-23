@@ -1,0 +1,136 @@
+<section id="m7" data-title="M7. Working together">
+<h2>M7: Working together</h2>
+<p class="why"><strong>What and why.</strong> So far you hand over a theorem and wait. But you often know something the model doesn't:
+"try induction", "that lemma is false", "use these three squares". This chapter makes the search a <strong>partner</strong>. A
+<code>Session</code> is a shared notebook between you and the search. You can write in it at <em>any</em> time: add a hint, suggest
+your own lemma, reject a lemma, pin an approach you like, pause, resume, or stop. The search reads it at <strong>checkpoints</strong>
+(before every round, plan and lemma). And when the search runs out of ideas, it doesn't quietly give up: it <strong>asks you</strong>
+a specific question ("I can't prove this step: ... Lean said: ..."), and your answer buys it another round.</p>
+
+<h3>Two things happening at once: threads</h3>
+<p>The search and your typing must run at the same time, so they run in two <strong>threads</strong>: two flows of work inside one
+program. That needs some care when both touch the same data. This chapter uses three standard tools from Python's library:</p>
+<ul>
+<li><strong>Lock</strong>: <code>with self._lock:</code> lets only one thread at a time inside that block, so the search never reads
+the hints list while you're halfway through adding to it.</li>
+<li><strong>Event</strong>: a flag threads can <em>wait</em> on. <code>pause()</code> clears it, <code>resume()</code> sets it, and the
+search's <code>checkpoint()</code> calls <code>wait()</code>, which simply blocks while the flag is cleared.</li>
+<li><strong>Queue</strong>: a thread-safe mailbox. <code>ask()</code> waits on <code>queue.get(timeout=...)</code> until <code>answer()</code>
+puts something in.</li>
+</ul>
+
+<ol class="steps">
+<li class="step">
+<p>Create the session.</p>
+{{file:mathfinder/collab.py}}
+<p class="explain"><strong>Everything becomes planner hints.</strong> A suggested lemma becomes the hint
+"The user suggests this lemma ... (it must still be proved)", so your lemma can never skip Lean's check. A pin becomes "keep developing
+this approach". A rejection does two things: it tells the planner not to use the lemma, and <code>uses_rejected</code> drops any plan that
+uses it anyway, matched by name or by statement with spacing normalized.</p>
+<p class="explain"><strong>stop()</strong> also <em>sets</em> the running flag and puts <code>None</code> in the answer queue. A paused
+search, or one waiting for your answer, would otherwise never notice the stop. <strong>edit_statement</strong> stops the search with a reason;
+the caller (the website, in M9) starts a new search on the new statement.</p>
+<p class="explain"><strong>hints()</strong> returns <code>list(self._hints)</code>, a <em>copy</em>, so the search can't be surprised by
+the list changing under it.</p>
+</li>
+
+<li class="step">
+<p>Teach the search to use a session. Replace the whole file:</p>
+{{file:mathfinder/search.py@m7}}
+<p class="explain"><strong>What changed:</strong></p>
+<ul class="explain">
+<li><code>search</code> takes <code>session=None</code>. Each round it plans with <code>hints + session.hints()</code>, so
+a hint you type mid-search is used from the next round. Plans that use a rejected lemma are dropped with the reason
+"uses X, which you rejected".</li>
+<li><code>stop_reason()</code> is called before every round and plan, and <code>prove_plan</code> checks before every lemma. That's where
+a pause waits and a stop ends the search.</li>
+<li>The <code>for</code> loop over rounds became <code>while True</code>, with a counter <code>r</code>. When <code>r</code> reaches
+<code>rounds</code>, it builds a question with <code>build_question</code>, sends it as an <code>ask_user</code> event and waits. A real
+answer becomes a hint, and <code>rounds += 1</code> extends the loop by one. That's why it couldn't stay a <code>for</code> loop over a
+fixed range. It asks at most <code>MAX_QUESTIONS</code> times, and only at depth 0 (sub-searches never ask).</li>
+<li><code>build_question</code> picks the first stuck lemma of the best plan and quotes Lean's error, so the question is specific enough to answer.</li>
+</ul>
+</li>
+
+<li class="step">
+<p>Create the collaboration tests.</p>
+{{file:tests/test_collab.py@m7}}
+<p class="explain">The Session tests use real threads: <code>threading.Timer(0.1, f)</code> runs <code>f</code> in a new thread after
+0.1 s, playing "the user answers a moment later". The search tests replace Lean and the model with fakes using
+<code>monkeypatch.setattr(search_module, ...)</code>, so the whole ask → answer → extra round → proved story runs in under a second.
+Lemma names decide the fake outcome: <code>good*</code> gets proved, <code>hard*</code> gets stuck.</p>
+</li>
+
+<li class="step">
+<p>Add the interactive mode to the command line. Replace the whole file:</p>
+{{file:mathfinder/cli.py@m7}}
+<p class="explain"><strong>What changed:</strong> new <code>COMMANDS</code> help text, <code>handle_command</code>, <code>interactive_search</code>,
+a <code>--interactive</code> flag, and printing for the new events (<code>ask_user</code>, <code>user_answer</code>, <code>no_answer</code>,
+<code>stopped</code>).</p>
+<p class="explain"><strong>handle_command</strong> uses <code>str.partition(" ")</code> to split "hint try x" into the command word and the
+rest. While a question is open, the whole line is your answer (except <code>pause</code>/<code>resume</code>/<code>stop</code>).</p>
+<p class="explain"><strong>interactive_search</strong> starts the search in a <code>threading.Thread</code>. <code>daemon=True</code> means
+the thread won't keep Python running after the main program ends. The main thread reads your typing, but
+<code>input()</code> would block forever even after the search finished. Instead, <code>select.select([sys.stdin], [], [], 0.5)</code> waits
+<em>at most</em> 0.5 seconds for a typed line, then loops round to check whether the search is still alive. An empty string from
+<code>readline()</code> means the input ended (Ctrl-D). The result comes back through <code>box</code>, a dictionary both threads can see.</p>
+</li>
+
+<li class="step">
+<p>Update the command line tests. Replace the whole file:</p>
+{{file:tests/test_cli.py@m7}}
+<p class="explain"><strong>What changed:</strong> two new tests at the end, for typed commands and for "while a question is open, the line is the answer".</p>
+</li>
+
+<li class="step">
+<p>Run the tests (all fast):</p>
+<pre><code>uv run pytest -q -m "not lean and not llm"</code></pre>
+</li>
+
+<li class="step">
+<p>Work together on a real theorem. Start this, then type the hint line while it runs:</p>
+<pre><code>uv run python -m mathfinder prove --lean "(a b c : ℝ) : a ^ 2 + b ^ 2 + c ^ 2 ≥ a * b + b * c + c * a" --interactive --no-explain --rounds 1</code></pre>
+<pre><code>hint add sq_nonneg (a - b), sq_nonneg (b - c), sq_nonneg (c - a) as nlinarith hints</code></pre>
+</li>
+</ol>
+
+<div class="checkpoint">
+<h3>Checkpoint</h3>
+<p>What we got (we also typed <code>pause</code> and then <code>resume</code>; about a minute):</p>
+<pre><code>While it runs you can type:
+  hint &lt;text&gt;                     e.g.  hint try induction on n
+  ...
+  [hint added: add sq_nonneg (a - b), sq_nonneg (b - c), sq_nonneg (c - a) as nlinarith hints]
+  [paused (type resume to continue)]
+  [resumed]
+
+— round 1: asking the planner —
+  ▶ plan: Direct nlinarith with the three squared-difference hints, as suggested by the user.  (lemmas: none)
+
+✓ VERIFIED by Lean. Plan: Direct nlinarith with the three squared-difference hints, as suggested by the user.
+
+namespace MathFinder
+
+theorem main (a b c : ℝ) : a ^ 2 + b ^ 2 + c ^ 2 ≥ a * b + b * c + c * a := by
+  nlinarith [sq_nonneg (a - b), sq_nonneg (b - c), sq_nonneg (c - a)]
+
+end MathFinder
+
+
+Result: PROVED (verified)</code></pre>
+<p class="explain">The planner used your hint ("as suggested by the user"). When a search gets stuck you'll instead see a
+<code>❓ I can't prove this step: ...</code> question: type an idea and press Enter.</p>
+<p>Fast tests:</p>
+<pre><code>............................................................             [100%]
+60 passed, 28 deselected in 0.71s</code></pre>
+</div>
+<div class="errors">
+<h3>Common errors</h3>
+<ul>
+<li>Your typing seems ignored: commands are read only <em>between</em> the search's steps, and a single Lean run can take 30 s. The
+<code>[hint added: ...]</code> line confirms it arrived; the hint is used from the next round.</li>
+<li>A test hangs: a thread waits forever. Check that <code>stop()</code> sets the event <em>and</em> puts <code>None</code> in the queue.</li>
+<li><code>KeyError: 'result'</code> after Ctrl-C: the search thread was interrupted before finishing. Just run again.</li>
+</ul>
+</div>
+</section>

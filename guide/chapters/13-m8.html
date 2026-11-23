@@ -1,0 +1,135 @@
+<section id="m8" data-title="M8. Traces + data">
+<h2>M8: Remember everything, then turn it into training data</h2>
+<p class="why"><strong>What and why.</strong> Every search produces valuable information: proofs Lean accepted, proofs Lean rejected
+(with the exact error), lemmas that turned out easy, false or stuck, and hints people gave. Systems like AlphaProof improved by training
+on exactly this kind of record of their own search. This chapter keeps it. A <strong>trace logger</strong> writes every event of every
+run to <code>runs/&lt;id&gt;/trace.jsonl</code>, failed attempts included, and <code>mathfinder export</code> turns all traces into four datasets:</p>
+<table>
+<tr><th>File</th><th>One row is</th><th>Trains</th></tr>
+<tr><td><code>sft.jsonl</code></td><td>goal (+ lemmas it may use) → a proof Lean accepted</td><td>the prover to imitate good proofs ("supervised fine-tuning")</td></tr>
+<tr><td><code>preferences.jsonl</code></td><td>same goal: a proof that worked vs. one that failed (+ its error)</td><td>the prover to <em>prefer</em> what works (e.g. DPO)</td></tr>
+<tr><td><code>value.jsonl</code></td><td>lemma statement → proved / refuted / stuck</td><td>a <strong>value model</strong> that guesses how hard a goal is, so search can try promising plans first</td></tr>
+<tr><td><code>hints.jsonl</code></td><td>the hints a person gave → whether it got proved</td><td>learning which advice actually helps</td></tr>
+</table>
+
+<ol class="steps">
+<li class="step">
+<p>Ignore the generated datasets in git. Replace the whole file:</p>
+{{file:.gitignore@m8}}
+<p class="explain"><strong>What changed:</strong> the last line, <code>data/</code>. It's rebuilt any time by <code>export</code>.</p>
+</li>
+
+<li class="step">
+<p>Make the prover report every attempt. Replace the whole file:</p>
+{{file:mathfinder/prover.py}}
+<p class="explain"><strong>What changed:</strong> <code>prove_lemma</code> takes <code>on_attempt=None</code>. Inside it, a small helper
+<code>report(...)</code> builds one record per attempt: the goal, the lemmas it could use (<code>context</code>), the proof, whether Lean
+accepted it, Lean's error, and where it came from (<code>hammer</code>, <code>llm</code> or <code>repair</code>). It's called for the
+hammer's winning tactic and, through <code>try_proofs</code>, for every LLM attempt.</p>
+<p class="explain"><strong>try_proofs</strong> now goes through <em>all</em> attempts instead of returning at the first success.
+Lean already checked them all in one run, so this costs nothing, and a failure sitting next to a success on the same goal is exactly a
+preference pair. We found this in a real run where preferences came out as 0.</p>
+<p class="explain"><code>lambda p, ok, e: report(p, ok, e, source)</code> adapts <code>report</code> (4 arguments) to what
+<code>try_proofs</code> calls (3 arguments), filling in <code>source</code> from the current round.</p>
+</li>
+
+<li class="step">
+<p>Test the attempt records. Replace the whole file:</p>
+{{file:tests/test_prover.py}}
+<p class="explain"><strong>What changed:</strong> the repair test now also checks the two records (failed <code>llm</code> attempt with an
+error, then the successful <code>repair</code> attempt), and a new test checks that a failure <em>after</em> a success in one batch is still reported.</p>
+</li>
+
+<li class="step">
+<p>Forward attempts as events from the search. Replace the whole file:</p>
+{{file:mathfinder/search.py}}
+<p class="explain"><strong>What changed:</strong> one line in <code>prove_plan</code>: <code>prove_lemma(..., on_attempt=lambda record:
+emit("attempt", **record))</code>. Every attempt becomes an <code>attempt</code> event, so every watcher (the terminal, the logger, later the
+website) can see it. <code>**record</code> unpacks the dictionary into keyword arguments.</p>
+</li>
+
+<li class="step">
+<p>Update one test fake for the new argument. Replace the whole file:</p>
+{{file:tests/test_collab.py}}
+<p class="explain"><strong>What changed:</strong> the fake <code>prove_lemma</code> accepts <code>on_attempt=None</code>, because the search now passes it.</p>
+</li>
+
+<li class="step">
+<p>Create the trace module.</p>
+{{file:mathfinder/traces.py@m8}}
+<p class="explain"><strong>JSON Lines</strong> (<code>.jsonl</code>) is one JSON object per line. You can append to it without reading it first,
+and a crash mid-run loses at most one line. <code>open("a")</code> opens a file for <em>appending</em>.
+<code>with self._lock, self.path.open("a") as f:</code> uses two context managers in one <code>with</code>: hold the lock <em>and</em> keep
+the file open, then release both.</p>
+<p class="explain"><strong>TraceLogger</strong> has a <code>__call__</code> method, so a logger object can be <em>called like a function</em>:
+<code>logger(event)</code>. That means it can be used directly as an <code>on_event</code> callback. <strong>chain</strong> makes one callback
+out of several, so one search can be printed <em>and</em> logged.</p>
+<p class="explain"><strong>records_from_trace</strong> turns one run's events into dataset rows. For preferences it groups attempts by goal
+(<code>dict.setdefault(key, []).append(...)</code> creates the list the first time a goal appears) and pairs every success with every failure.
+<strong>export</strong> removes duplicate rows by using each row's JSON text (with <code>sort_keys=True</code>, so key order doesn't matter) as a dictionary key.</p>
+</li>
+
+<li class="step">
+<p>Create its tests.</p>
+{{file:tests/test_traces.py@m8}}
+</li>
+
+<li class="step">
+<p>Log every run and add the <code>export</code> command. Replace the whole file:</p>
+{{file:mathfinder/cli.py@m8}}
+<p class="explain"><strong>What changed:</strong> <code>new_run_dir</code> makes the run folder <em>before</em> searching (adding <code>-2</code>,
+<code>-3</code> if two runs start in the same second), and <code>save_run</code> now writes into that folder. <code>main</code> wraps the printer and
+the logger with <code>chain</code>, calls <code>logger.finish(...)</code> with the hints used (including ones typed in <code>--interactive</code>
+mode, which <code>interactive_search</code> now returns), and prints where the trace is. There's a new <code>export</code> sub-command.
+<code>f"{name:12}"</code> pads the name to 12 characters, so the counts line up in a column.</p>
+</li>
+
+<li class="step">
+<p>Update the command line tests. Replace the whole file:</p>
+{{file:tests/test_cli.py@m8}}
+<p class="explain"><strong>What changed:</strong> the main test also checks <code>trace.jsonl</code> (first line <code>meta</code>, last line
+<code>result</code>), and a new test runs <code>export</code> on an empty runs folder.</p>
+</li>
+
+<li class="step">
+<p>Run the tests:</p>
+<pre><code>uv run pytest -q -m "not lean and not llm"
+uv run pytest -q tests/test_prover.py</code></pre>
+</li>
+
+<li class="step">
+<p>Prove something, then build the datasets:</p>
+<pre><code>uv run python -m mathfinder prove --lean "(x : ℝ) (hx : 0 &lt; x) : x + 1 / x ≥ 2" --no-explain
+uv run python -m mathfinder export</code></pre>
+</li>
+</ol>
+
+<div class="checkpoint">
+<h3>Checkpoint</h3>
+<p>What we got (about 1½ minutes for the proof):</p>
+<pre><code>  ▶ plan: Write x + 1/x as the single fraction (x*x+1)/x. Clear the denominator with le_div_iff₀, ...  (lemmas: combine_frac, quad_ineq)
+      ✓ combine_frac : (x : ℝ) (hx : 0 &lt; x) : x + 1 / x = (x * x + 1) / x   [hammer: field_simp]
+      ✓ quad_ineq : (x : ℝ) : 2 * x ≤ x * x + 1   [LLM]
+✓ VERIFIED by Lean. ...
+Result: PROVED (verified)
+Trace: /Users/you/Desktop/math_proofs/runs/20261114-152642/trace.jsonl
+
+sft              3 rows  -> .../data/sft.jsonl
+preferences      0 rows  -> .../data/preferences.jsonl
+value            2 rows  -> .../data/value.jsonl
+hints            0 rows  -> .../data/hints.jsonl</code></pre>
+<p class="explain">Your counts depend on all your runs so far. Preferences appear only when some attempt on a goal failed and another
+succeeded. Easy theorems often have none; harder ones (M12) produce plenty. Look inside: <code>head -c 600 data/sft.jsonl</code>.</p>
+<p>Fast tests:</p>
+<pre><code>.................................................................        [100%]
+65 passed, 29 deselected in 0.77s</code></pre>
+</div>
+<div class="errors">
+<h3>Common errors</h3>
+<ul>
+<li><code>export</code> shows all zeros: no <code>runs/*/trace.jsonl</code> files yet. Runs from before this chapter have no trace; prove something new.</li>
+<li><code>json.decoder.JSONDecodeError</code> reading a trace: a run was killed mid-write. Delete that run's last (broken) line, or the folder.</li>
+<li><code>TypeError: fake_prove() got an unexpected keyword argument 'on_attempt'</code>: a test fake needs <code>on_attempt=None</code> (step 5).</li>
+</ul>
+</div>
+</section>

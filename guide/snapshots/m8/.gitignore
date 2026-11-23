@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+runs/
+lean_env/.lake/
+lean_env/.mf_tmp/
+cache_get.log
+cache/
+data/

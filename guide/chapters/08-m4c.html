@@ -1,0 +1,131 @@
+<section id="m4c" data-title="M4c. Search + CLI">
+<h2>M4c: The search loop and the command line</h2>
+<p class="why"><strong>What and why.</strong> We now have all the pieces: a hammer, a planner, a critic and a prover.
+<code>search.py</code> runs them in a loop: <strong>(0)</strong> maybe automation proves the whole theorem; <strong>(1)</strong> the planner
+proposes plans; <strong>(2)</strong> the critic drops the ones that don't fit together; <strong>(3)</strong> the rest are tried
+<em>cheapest first</em> (fewest lemmas), each lemma going to the prover; <strong>(4)</strong> a plan with every lemma proved is
+assembled into one file and gets the strict final check; <strong>(5)</strong> everything that went wrong becomes feedback for
+the next round of planning. That last step is what makes it a <em>search</em> and not a lottery: each round knows which ideas
+failed and why. Finally, a command line lets you run it from the terminal.</p>
+
+<h3>Events</h3>
+<p>The search never prints anything itself. It reports what happens as <strong>events</strong>, small dictionaries like
+<code>{"kind": "lemma_proved", "name": "odd_sum", ...}</code>, passed to an <code>on_event</code> function you supply. The command
+line prints them; later the website will stream the same events to your browser, and the trace logger will save them for
+training. One search, many watchers.</p>
+
+<ol class="steps">
+<li class="step">
+<p>Keep plan lemmas from clashing with Mathlib's names. Replace the whole file:</p>
+{{file:mathfinder/prover.py@m4c}}
+<p class="explain"><strong>What changed:</strong> only <code>preamble_for</code>. The earlier lemmas now go inside
+<code>namespace MathFinder</code>. Without it, a plan lemma the model happens to call <code>sq_nonneg</code> would collide with
+Mathlib's <code>sq_nonneg</code> ("already declared") and every attempt would fail. Lean allows a namespace to stay open at the
+end of a file, so the candidates that follow are inside it too and can use the lemmas by their short names.</p>
+</li>
+
+<li class="step">
+<p>Update the prover test for the new preamble. Replace the whole file:</p>
+{{file:tests/test_prover.py@m4c}}
+<p class="explain"><strong>What changed:</strong> <code>test_preamble_uses_real_proofs_when_known</code> expects the
+<code>namespace MathFinder</code> line, and checks that no earlier lemmas means an empty preamble.</p>
+</li>
+
+<li class="step">
+<p>Create the search.</p>
+{{file:mathfinder/search.py@m4c}}
+<p class="explain"><strong>assemble</strong> writes the final file: every lemma with its <em>real</em> proof, then
+<code>theorem main</code>, all inside <code>namespace MathFinder</code>. That's why the final check asks about
+<code>MathFinder.main</code>, the theorem's full name.</p>
+<p class="explain"><strong>score</strong> is the fraction of a plan's lemmas that got proved, used to remember the closest
+plan. A refuted lemma means the plan's idea is wrong, so it scores <code>-1</code>.</p>
+<p class="explain"><strong>summarize</strong> turns a failed plan into text for the planner: each lemma with its status
+(PROVED / REFUTED / STUCK) and the reason. <code>feedback[-6:]</code> sends only the six most recent summaries, so the prompt
+doesn't grow forever.</p>
+<p class="explain"><strong>emit</strong> is a function defined <em>inside</em> <code>search</code> (a <em>closure</em>): it can use
+<code>on_event</code> from the enclosing function. <code>**data</code> collects keyword arguments into a dictionary, so
+<code>emit("round", number=1)</code> sends <code>{"kind": "round", "number": 1}</code>.</p>
+<p class="explain"><strong>sorted(fitting, key=lambda p: len(p.lemmas))</strong> is the simple form of <em>best-first
+search</em>: try the plan that looks cheapest first. A <code>lambda</code> is a tiny unnamed function.
+<code>SearchResult | None</code> in a type hint means "a SearchResult, or nothing".</p>
+</li>
+
+<li class="step">
+<p>Create the command line.</p>
+{{file:mathfinder/cli.py@m4c}}
+<p class="explain"><strong>argparse</strong> reads command line arguments. <code>add_subparsers</code> gives us sub-commands
+(<code>prove</code> now; <code>bench</code> and <code>export</code> later). <code>action="append"</code> lets you repeat
+<code>--hint</code>. <code>main</code> returns an <em>exit code</em>: 0 means success, so scripts can check whether the proof was found.</p>
+</li>
+
+<li class="step">
+<p>Make the package runnable with <code>python -m mathfinder</code>.</p>
+{{file:mathfinder/__main__.py}}
+<p class="explain">When you run <code>python -m somepackage</code>, Python runs that package's <code>__main__.py</code>.</p>
+</li>
+
+<li class="step">
+<p>Create the tests.</p>
+{{file:tests/test_search.py@m4c}}
+<p class="explain"><strong>capsys</strong> is a pytest fixture that captures what the code prints. The scripted full-search
+test tells the planner and the prover apart by their system prompt (<code>system == planner.SYSTEM</code>), so one fake
+model can play both roles. It checks a real two-lemma plan: the hammer proves <code>le_sq</code>, the "model" proves
+<code>odd_sum</code> by induction, and the assembled file passes the strict final check.</p>
+</li>
+
+<li class="step">
+<p>Run the tests:</p>
+<pre><code>uv run pytest -q -m "not lean and not llm"
+uv run pytest -q tests/test_search.py</code></pre>
+</li>
+
+<li class="step">
+<p>Prove your first theorem from the command line:</p>
+<pre><code>uv run python -m mathfinder prove --lean "(n : ℕ) : ∑ i ∈ Finset.range n, (2 * i + 1) = n ^ 2"</code></pre>
+</li>
+</ol>
+
+<div class="checkpoint">
+<h3>Checkpoint</h3>
+<p>The command from the last step printed this for us (about 40 s; your plans will be worded differently):</p>
+<pre><code>— round 1: asking the planner —
+  ✗ plan doesn't fit together: Use Mathlib's telescoping principle Finset.sum_range_induction ...
+      Application type mismatch: The argument
+  fun k => odd_step k ...
+  ▶ plan: Induct on n. The base case is trivial. In the successor case, peel off the last term
+          with Finset.sum_range_succ, rewrite with the induction hypothesis, and close with ring.  (lemmas: none)
+
+✓ VERIFIED by Lean. Plan: Induct on n. ...
+
+namespace MathFinder
+
+theorem main (n : ℕ) : ∑ i ∈ Finset.range n, (2 * i + 1) = n ^ 2 := by
+  induction n with
+  | zero => simp
+  | succ k ih =>
+    rw [Finset.sum_range_succ, ih]
+    ring
+
+end MathFinder
+
+
+Result: PROVED (verified)</code></pre>
+<p class="explain">Look at what happened: the critic caught a broken plan in one Lean run, before any time went into proving
+its lemmas, and the second plan went through.</p>
+<p>A false statement stops immediately, with no planning at all:</p>
+<pre><code>uv run python -m mathfinder prove --lean "(n : ℕ) : n ^ 2 ≤ 2 * n + 3"</code></pre>
+<pre><code>Theorem: (n : ℕ) : n ^ 2 ≤ 2 * n + 3
+✗ The statement is FALSE. Counterexample: n := 4; issue: 16 ≤ 11 does not hold
+
+Result: not proved (the statement is false: n := 4; issue: 16 ≤ 11 does not hold)</code></pre>
+</div>
+<div class="errors">
+<h3>Common errors</h3>
+<ul>
+<li><code>error: the following arguments are required: --lean</code>: LaTeX input arrives in M5; for now give the Lean statement.</li>
+<li>Your shell mangles <code>∑</code> or <code>ℕ</code>: always put the statement in double quotes. You can also write <code>Nat</code> instead of <code>ℕ</code>.</li>
+<li>Every plan fails the final check with <code>unknown constant 'MathFinder.main'</code>: your <code>assemble</code> is missing
+the <code>namespace MathFinder</code> / <code>end MathFinder</code> lines.</li>
+</ul>
+</div>
+</section>
