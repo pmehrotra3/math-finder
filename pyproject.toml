@@ -13,6 +13,7 @@ dependencies = [
 dev = [
     "httpx>=0.27",
     "pytest>=8",
+    "ruff>=0.17.6",
 ]
 
 [build-system]
@@ -30,3 +31,10 @@ markers = [
     "lean: runs Lean (about 25 s each). Skip with: pytest -m 'not lean'",
 ]
 addopts = "-m 'not llm'"
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["lean_env"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]

@@ -94,7 +94,7 @@ class Run:
             # asyncio queues aren't thread-safe: ask each WebSocket's event loop to do the put itself
             loop.call_soon_threadsafe(q.put_nowait, event)
 
-    def subscribe(self, loop) -> tuple[list[dict], asyncio.Queue]:
+    def subscribe(self, loop: asyncio.AbstractEventLoop) -> tuple[list[dict], asyncio.Queue]:
         q = asyncio.Queue()
         with self.lock:  # history + registration together, so no event is missed or sent twice
             self.listeners.append((loop, q))
@@ -102,7 +102,7 @@ class Run:
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
         with self.lock:
-            self.listeners = [(l, x) for l, x in self.listeners if x is not q]
+            self.listeners = [(cb, x) for cb, x in self.listeners if x is not q]
 
     def start(self) -> None:
         threading.Thread(target=self._work, daemon=True).start()
@@ -120,8 +120,13 @@ class Run:
         if result.proved:
             better = optimizer.optimize(self.statement, lean_code, plan, self.metric, self.on_event)
             lean_code, plan = better.lean_code, better.plan
-            optimization = {"metric": better.metric, "before": better.original, "after": better.best,
-                            "improved": better.improved, "tried": better.tried}
+            optimization = {
+                "metric": better.metric,
+                "before": better.original,
+                "after": better.best,
+                "improved": better.improved,
+                "tried": better.tried,
+            }
             self.on_event({"kind": "explaining"})
             try:
                 explanation = explainer.explain(self.latex or self.statement, plan, lean_code)
@@ -156,7 +161,7 @@ def get_run(run_id: str) -> Run:
 
 
 @app.post("/api/formalize")
-def formalize(req: FormalizeRequest):
+def formalize(req: FormalizeRequest) -> dict:
     # A plain `def` (not `async def`): FastAPI runs it in a worker thread, so this slow call
     # (model + Lean) doesn't freeze the server for everyone else.
     f = formalizer.formalize(req.latex)
@@ -164,12 +169,12 @@ def formalize(req: FormalizeRequest):
 
 
 @app.post("/api/check")
-def check(req: CheckRequest):
+def check(req: CheckRequest) -> dict:
     return {"errors": statement_errors(req.statement)}
 
 
 @app.post("/api/sessions")
-def start_session(req: StartRequest):
+def start_session(req: StartRequest) -> dict:
     if req.metric not in optimizer.METRICS:
         raise HTTPException(status_code=400, detail=f"metric must be one of {sorted(optimizer.METRICS)}")
     run = Run(req.statement, req.latex, req.hints, req.rounds, req.metric)
@@ -179,7 +184,7 @@ def start_session(req: StartRequest):
 
 
 @app.get("/api/sessions/{run_id}")
-def session_status(run_id: str):
+def session_status(run_id: str) -> dict:
     run = get_run(run_id)
     return {
         "id": run.id,
@@ -193,7 +198,7 @@ def session_status(run_id: str):
 
 
 @app.post("/api/sessions/{run_id}/{action}")
-def session_action(run_id: str, action: str, req: ActionRequest):
+def session_action(run_id: str, action: str, req: ActionRequest) -> dict:
     run = get_run(run_id)
     s = run.session
     if action == "hint":
@@ -227,7 +232,7 @@ def session_action(run_id: str, action: str, req: ActionRequest):
 
 
 @app.websocket("/ws/{run_id}")
-async def watch(websocket: WebSocket, run_id: str):
+async def watch(websocket: WebSocket, run_id: str) -> None:
     await websocket.accept()
     if run_id not in RUNS:
         await websocket.close(code=4404)

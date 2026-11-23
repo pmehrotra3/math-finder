@@ -10,7 +10,6 @@ a proved theorem also gets proof.lean + explanation.md there. After the first pr
 the optimizer looks for a better one (--metric short | readable | few_lemmas).
 With --interactive you can type hints and commands while the search runs.
 
-  uv run python -m mathfinder export      builds training data in data/ from all traces
   uv run python -m mathfinder bench       runs the benchmark in bench/problems.jsonl
 """
 
@@ -18,6 +17,7 @@ import argparse
 import select
 import sys
 import threading
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -29,11 +29,10 @@ from mathfinder.formalize import formalize
 from mathfinder.lean import HEADER, statement_errors
 from mathfinder.llm import LLMError
 from mathfinder.optimize import METRICS, optimize
-from mathfinder.search import search
-from mathfinder.traces import TraceLogger, chain, export
+from mathfinder.search import SearchResult, search
+from mathfinder.traces import OnEvent, TraceLogger, chain
 
 RUNS_DIR = PROJECT_ROOT / "runs"
-DATA_DIR = PROJECT_ROOT / "data"
 
 SYMBOL = {"lemma_proved": "✓", "lemma_refuted": "✗", "lemma_stuck": "…"}
 
@@ -82,7 +81,7 @@ def print_event(event: dict) -> None:
     sys.stdout.flush()  # show progress immediately, even when output is piped to a file
 
 
-def approve(latex: str, auto_yes: bool = False, ask=input) -> str | None:
+def approve(latex: str, auto_yes: bool = False, ask: Callable[[str], str] = input) -> str | None:
     """Formalize `latex`, show it, and return the statement the user approved (None = no)."""
     print("Formalizing (LaTeX → Lean)...")
     f = formalize(latex)
@@ -158,7 +157,9 @@ def handle_command(session: Session, line: str) -> str:
     return "unknown command. " + COMMANDS
 
 
-def interactive_search(statement: str, hints: list[str], rounds: int, on_event=print_event):
+def interactive_search(
+    statement: str, hints: list[str], rounds: int, on_event: OnEvent = print_event
+) -> tuple[SearchResult, list[str]]:
     """Run the search in a background thread while this thread reads your commands.
     Returns (result, every hint used, including the ones you typed)."""
     session = Session(statement)
@@ -205,7 +206,7 @@ def save_run(folder: Path, theorem: str, lean_code: str, explanation: str) -> Pa
     return folder
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mathfinder")
     commands = parser.add_subparsers(dest="command", required=True)
     prove = commands.add_parser("prove", help="search for a proof")
@@ -218,8 +219,6 @@ def main(argv=None) -> int:
     prove.add_argument("--metric", choices=sorted(METRICS), default="short", help="what 'better proof' means")
     prove.add_argument("--no-optimize", action="store_true", help="keep the first proof found")
     prove.add_argument("--interactive", action="store_true", help="type hints and commands while it searches")
-    export_cmd = commands.add_parser("export", help="build training data from all runs/*/trace.jsonl")
-    export_cmd.add_argument("--out", default=str(DATA_DIR), help="output folder (default: data/)")
     bench_cmd = commands.add_parser("bench", help="run the benchmark in bench/problems.jsonl")
     bench_cmd.add_argument("--rounds", type=int, default=2, help="planning rounds per problem")
     bench_cmd.add_argument("--only", nargs="*", default=[], help="names of problems to run (default: all)")
@@ -232,12 +231,6 @@ def main(argv=None) -> int:
         rows, md_path = run_bench(problems, args.rounds)
         print("\n" + results_table(rows))
         print(f"\nSaved {md_path}")
-        return 0
-
-    if args.command == "export":
-        counts = export(RUNS_DIR, Path(args.out))
-        for name, count in counts.items():
-            print(f"{name:12} {count:5} rows  -> {Path(args.out) / (name + '.jsonl')}")
         return 0
 
     if args.command == "prove":
@@ -267,8 +260,10 @@ def main(argv=None) -> int:
         if not args.no_optimize:
             print(f"\nLooking for a better proof (metric: {args.metric})...")
             better = optimize(statement, lean_code, plan, args.metric, on_event)
-            print(f"  cost {better.original['cost']} → {better.best['cost']}"
-                  + ("  (better proof found)" if better.improved else "  (kept the first proof)"))
+            print(
+                f"  cost {better.original['cost']} → {better.best['cost']}"
+                + ("  (better proof found)" if better.improved else "  (kept the first proof)")
+            )
             if better.improved:
                 lean_code, plan = better.lean_code, better.plan
                 print("\n" + lean_code)

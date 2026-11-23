@@ -61,7 +61,7 @@ def clean_statement(text: str) -> str:
     text = text.strip()
     for keyword in ("theorem ", "lemma ", "example "):
         if text.startswith(keyword):
-            rest = text[len(keyword):].lstrip()
+            rest = text[len(keyword) :].lstrip()
             if keyword != "example " and not rest.startswith(("(", "{", "[", ":")):
                 rest = rest.split(None, 1)[1] if " " in rest else ""  # drop the name
             text = rest
@@ -73,7 +73,7 @@ def formalize(latex: str) -> Formalization:
     """LaTeX in; a checked Lean statement with a back-translation and a judgment out."""
     result = Formalization(latex)
     prompt = f"Theorem in LaTeX:\n{latex}"
-    for attempt in range(1 + REPAIR_ROUNDS):
+    for _ in range(1 + REPAIR_ROUNDS):
         data = llm.complete_json(SYSTEM_FORMALIZE, prompt)
         result.statement = clean_statement(str(data.get("statement", "")))
         result.errors = statement_errors(result.statement) if result.statement else ["empty statement"]

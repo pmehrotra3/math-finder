@@ -25,12 +25,7 @@ def test_indent_adds_two_spaces_per_line():
 
 def test_render_wraps_heartbeats_and_indents_proof():
     text = Decl("t", "(n : ℕ) : n + 0 = n", "simp").render(heartbeats=1000)
-    assert text == (
-        "-- t\n"
-        "set_option maxHeartbeats 1000 in\n"
-        "example (n : ℕ) : n + 0 = n := by\n"
-        "  simp\n"
-    )
+    assert text == ("-- t\nset_option maxHeartbeats 1000 in\nexample (n : ℕ) : n + 0 = n := by\n  simp\n")
 
 
 def test_render_with_context_uses_its_own_namespace():

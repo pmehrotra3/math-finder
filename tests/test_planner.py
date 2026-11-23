@@ -1,10 +1,10 @@
-"""Tests for mathfinder/planner.py and the skeleton check in mathfinder/critic.py."""
+"""Tests for mathfinder/planner.py and the skeleton check in mathfinder/search.py."""
 
 import pytest
 
 from mathfinder import llm
-from mathfinder.critic import check_skeletons
 from mathfinder.planner import Lemma, Plan, build_prompt, parse_plans, propose_plans
+from mathfinder.search import check_skeletons
 
 AMGM = "(a b : ℝ) : a ^ 2 + b ^ 2 ≥ 2 * a * b"
 
@@ -33,8 +33,15 @@ def test_parse_plans_keeps_only_wellformed_plans():
 
 
 def test_parse_plans_rejects_duplicate_lemma_names():
-    data = {"plans": [{"sketch": "", "main_proof": "simp", "lemmas": [
-        {"name": "a", "statement": ": True"}, {"name": "a", "statement": ": True"}]}]}
+    data = {
+        "plans": [
+            {
+                "sketch": "",
+                "main_proof": "simp",
+                "lemmas": [{"name": "a", "statement": ": True"}, {"name": "a", "statement": ": True"}],
+            }
+        ]
+    }
     assert parse_plans(data) == []
 
 

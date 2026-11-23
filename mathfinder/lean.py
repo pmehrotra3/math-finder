@@ -64,19 +64,10 @@ class Decl:
 
     def render(self, heartbeats: int = DEFAULT_HEARTBEATS) -> str:
         body = indent(self.proof)
-        example = (
-            f"set_option maxHeartbeats {heartbeats} in\n"
-            f"example {self.statement} := by\n{body}\n"
-        )
+        example = f"set_option maxHeartbeats {heartbeats} in\nexample {self.statement} := by\n{body}\n"
         if not self.context:
             return f"-- {self.name}\n{example}"
-        return (
-            f"-- {self.name}\n"
-            f"namespace {self.name}\n\n"
-            f"{self.context.strip()}\n\n"
-            f"{example}\n"
-            f"end {self.name}\n"
-        )
+        return f"-- {self.name}\nnamespace {self.name}\n\n{self.context.strip()}\n\n{example}\nend {self.name}\n"
 
 
 @dataclass

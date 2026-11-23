@@ -13,6 +13,10 @@ import os
 import re
 import subprocess
 import tempfile
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import anthropic
 
 MODEL = "claude-opus-5-5"
 CLI_TIMEOUT = 600  # seconds; a hard proof plan can take a few minutes to write
@@ -25,13 +29,18 @@ class LLMError(Exception):
 
 def complete_cli(system: str, prompt: str) -> str:
     cmd = [
-        "claude", "-p",
-        "--system-prompt", system,
-        "--tools", "",  # text only: it may not run commands or edit files
+        "claude",
+        "-p",
+        "--system-prompt",
+        system,
+        "--tools",
+        "",  # text only: it may not run commands or edit files
         "--no-session-persistence",
         "--strict-mcp-config",
-        "--setting-sources", "",  # ignore your personal settings and hooks
-        "--output-format", "text",
+        "--setting-sources",
+        "",  # ignore your personal settings and hooks
+        "--output-format",
+        "text",
     ]
     if os.environ.get("MATHFINDER_CLI_MODEL"):
         cmd += ["--model", os.environ["MATHFINDER_CLI_MODEL"]]
@@ -45,7 +54,7 @@ def complete_cli(system: str, prompt: str) -> str:
             cwd=tempfile.gettempdir(),  # run outside the project so no project files leak in
         )
     except subprocess.TimeoutExpired:
-        raise LLMError(f"claude CLI timed out after {CLI_TIMEOUT}s")
+        raise LLMError(f"claude CLI timed out after {CLI_TIMEOUT}s") from None
     if proc.returncode != 0:
         raise LLMError(f"claude CLI failed: {proc.stderr.strip()[-500:]}")
     text = proc.stdout.strip()
@@ -57,7 +66,7 @@ def complete_cli(system: str, prompt: str) -> str:
 _client = None
 
 
-def get_client():
+def get_client() -> "anthropic.Anthropic":
     """Create the API client once and reuse it (it keeps connections open)."""
     global _client
     if _client is None:
@@ -97,7 +106,7 @@ def complete(system: str, prompt: str) -> str:
     return BACKENDS[name](system, prompt)
 
 
-def extract_json(text: str):
+def extract_json(text: str) -> object:
     """Pull a JSON value out of a model answer, with or without a ```json fence."""
     fenced = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
     if fenced:
@@ -112,10 +121,10 @@ def extract_json(text: str):
     try:
         return json.loads(candidate)
     except json.JSONDecodeError as e:
-        raise LLMError(f"invalid JSON: {e}")
+        raise LLMError(f"invalid JSON: {e}") from e
 
 
-def complete_json(system: str, prompt: str, retries: int = 1):
+def complete_json(system: str, prompt: str, retries: int = 1) -> object:
     """Like complete(), but returns parsed JSON. On bad JSON, asks again with the error."""
     answer = complete(system, prompt)
     for attempt in range(retries + 1):

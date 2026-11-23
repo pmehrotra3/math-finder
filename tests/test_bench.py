@@ -41,8 +41,10 @@ def test_run_bench_records_and_saves_every_problem(monkeypatch, tmp_path):
         return SearchResult(True, "theorem main : True := by\n  exact k\n", plan, 1, "verified")
 
     monkeypatch.setattr(bench, "search", fake_search)
-    problems = [{"name": "good", "topic": "t", "statement": ": True"},
-                {"name": "bad", "topic": "t", "statement": ": fail"}]
+    problems = [
+        {"name": "good", "topic": "t", "statement": ": True"},
+        {"name": "bad", "topic": "t", "statement": ": fail"},
+    ]
     rows, md_path = bench.run_bench(problems, rounds=2, on_progress=lambda line: None)
 
     assert [(r["name"], r["proved"], r["attempts"]) for r in rows] == [("good", True, 1), ("bad", False, 1)]

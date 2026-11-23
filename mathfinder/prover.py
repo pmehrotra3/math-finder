@@ -9,11 +9,12 @@
 The lemma ends up "proved" (with a proof), "refuted" (with a counterexample) or
 "stuck" (with the most useful Lean error, so the planner can rethink).
 
-Every attempt, failed ones included, can be reported to an `on_attempt` callback.
-Those records are the raw material for training data (M8).
+Every attempt, failed ones included, can be reported to an `on_attempt` callback
+(the trace keeps them, so you can see why a lemma got stuck).
 """
 
 import json
+from collections.abc import Callable, Sequence
 
 from mathfinder import PROJECT_ROOT, llm
 from mathfinder.hammer import hammer
@@ -40,7 +41,7 @@ Reply with ONLY a JSON object inside a ```json block: {"proofs": ["<tactic scrip
 
 def cache_key(lemma: Lemma, earlier: list[Lemma]) -> str:
     """Same statement AND same available lemmas = same problem. Whitespace doesn't matter."""
-    context = " ; ".join(f"{l.name} {l.statement}" for l in earlier)
+    context = " ; ".join(f"{lem.name} {lem.statement}" for lem in earlier)
     return " ".join(f"{context} ⊢ {lemma.statement}".split())
 
 
@@ -69,19 +70,21 @@ def preamble_for(earlier: list[Lemma]) -> str:
     if not earlier:
         return ""
     parts = []
-    for l in earlier:
-        proof = l.proof if l.status == "proved" else "sorry"
+    for lem in earlier:
+        proof = lem.proof if lem.status == "proved" else "sorry"
         body = "\n".join("  " + line for line in proof.split("\n"))
-        parts.append(f"theorem {l.name} {l.statement} := by\n{body}")
+        parts.append(f"theorem {lem.name} {lem.statement} := by\n{body}")
     return "namespace MathFinder\n\n" + "\n\n".join(parts)
 
 
-def build_prompt(lemma: Lemma, earlier: list[Lemma], failures: list[tuple[str, str]] = ()) -> str:
+def build_prompt(lemma: Lemma, earlier: list[Lemma], failures: Sequence[tuple[str, str]] = ()) -> str:
     parts = [f"Prove this lemma:\n  theorem {lemma.name} {lemma.statement}"]
     if lemma.informal:
         parts.append(f"In words: {lemma.informal}")
     if earlier:
-        parts.append("Earlier lemmas you may use:\n" + "\n".join(f"  theorem {l.name} {l.statement}" for l in earlier))
+        parts.append(
+            "Earlier lemmas you may use:\n" + "\n".join(f"  theorem {lem.name} {lem.statement}" for lem in earlier)
+        )
     for proof, error in failures:
         parts.append(f"This attempt FAILED:\n{proof}\nLean said:\n{error[:MAX_ERROR]}")
     if failures:
@@ -90,7 +93,7 @@ def build_prompt(lemma: Lemma, earlier: list[Lemma], failures: list[tuple[str, s
     return "\n\n".join(parts)
 
 
-def parse_proofs(data) -> list[str]:
+def parse_proofs(data: object) -> list[str]:
     """Keep only usable proof strings; strip a leading `by` the model may add."""
     proofs = []
     raw = data.get("proofs", []) if isinstance(data, dict) else []
@@ -106,17 +109,18 @@ def parse_proofs(data) -> list[str]:
     return proofs
 
 
-def ask_for_proofs(lemma: Lemma, earlier: list[Lemma], failures=()) -> list[str]:
+def ask_for_proofs(lemma: Lemma, earlier: list[Lemma], failures: Sequence[tuple[str, str]] = ()) -> list[str]:
     try:
         return parse_proofs(llm.complete_json(SYSTEM, build_prompt(lemma, earlier, failures)))
     except llm.LLMError:
         return []  # one bad model answer shouldn't end the search
 
 
-def try_proofs(lemma: Lemma, proofs: list[str], preamble: str, report=None):
+def try_proofs(
+    lemma: Lemma, proofs: list[str], preamble: str, report: Callable[[str, bool, str], None] | None = None
+) -> tuple[str | None, list[tuple[str, str]]]:
     """Check all proofs in one Lean run. Returns (first working proof or None, [(proof, error), ...]).
-    `report(proof, ok, error)` is called for EVERY attempt: Lean checked them all anyway,
-    and the failures next to a success are exactly what preference training needs."""
+    `report(proof, ok, error)` is called for EVERY attempt: Lean checked them all anyway."""
     decls = [Decl(f"attempt_{i}", lemma.statement, p) for i, p in enumerate(proofs)]
     results = check_decls(decls, preamble)
     found = None
@@ -136,17 +140,30 @@ def try_proofs(lemma: Lemma, proofs: list[str], preamble: str, report=None):
 # ---------- the whole pipeline ----------
 
 
-def prove_lemma(lemma: Lemma, earlier: list[Lemma] = (), use_cache: bool = True, on_attempt=None) -> Lemma:
+def prove_lemma(
+    lemma: Lemma,
+    earlier: Sequence[Lemma] = (),
+    use_cache: bool = True,
+    on_attempt: Callable[[dict], None] | None = None,
+) -> Lemma:
     """Try to prove `lemma` (which may use the `earlier` lemmas). Updates and returns it.
     `on_attempt(record)` (optional) receives one dict per proof attempt, for the trace log."""
     earlier = list(earlier)
     key = cache_key(lemma, earlier)
-    context = [f"theorem {l.name} {l.statement}" for l in earlier]
+    context = [f"theorem {lem.name} {lem.statement}" for lem in earlier]
 
     def report(proof: str, ok: bool, error: str, source: str) -> None:
         if on_attempt:
-            on_attempt({"statement": lemma.statement, "context": context, "proof": proof,
-                        "ok": ok, "error": error[:MAX_ERROR], "source": source})
+            on_attempt(
+                {
+                    "statement": lemma.statement,
+                    "context": context,
+                    "proof": proof,
+                    "ok": ok,
+                    "error": error[:MAX_ERROR],
+                    "source": source,
+                }
+            )
 
     if use_cache and key in load_cache():
         lemma.status, lemma.proof, lemma.feedback = "proved", load_cache()[key], "from cache"
@@ -169,7 +186,7 @@ def prove_lemma(lemma: Lemma, earlier: list[Lemma] = (), use_cache: bool = True,
         if not proofs:
             continue
         source = "llm" if round_number == 0 else "repair"
-        found, failures = try_proofs(lemma, proofs, preamble, lambda p, ok, e: report(p, ok, e, source))
+        found, failures = try_proofs(lemma, proofs, preamble, lambda p, ok, e, source=source: report(p, ok, e, source))
         if found:
             how = "LLM" if round_number == 0 else f"LLM after {round_number} repair round(s)"
             lemma.status, lemma.proof, lemma.feedback = "proved", found, how

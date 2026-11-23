@@ -115,14 +115,6 @@ def test_while_a_question_is_open_any_line_is_the_answer():
     assert s.ask("Any idea?") == "hint this whole line is an answer"
 
 
-def test_export_command_prints_row_counts(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(cli, "RUNS_DIR", tmp_path / "runs")
-    (tmp_path / "runs").mkdir()
-    assert cli.main(["export", "--out", str(tmp_path / "data")]) == 0
-    out = capsys.readouterr().out
-    assert "sft" in out and "preferences" in out and (tmp_path / "data" / "value.jsonl").exists()
-
-
 def test_a_better_proof_from_the_optimizer_is_the_one_saved_and_explained(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "RUNS_DIR", tmp_path)
     monkeypatch.setattr(cli, "search", lambda *a, **k: SearchResult(True, "LONG PROOF\n", Plan("long", [], "x")))

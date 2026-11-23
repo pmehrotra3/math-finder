@@ -16,7 +16,7 @@ README must come from a real run that is in the repo.
 
 ## Rules (every run)
 
-1. Start by reading this file, then the last ~40 lines of `docs/DEVLOG.md` (or `PROGRESS.md` before step 1 moves it). This file (`prompt.md`) is the plan and checklist: tick steps here.
+1. Start by reading this file, then the last ~40 lines of `docs/DEVLOG.md`. This file (`prompt.md`) is the plan and checklist: tick steps here.
 2. Pick the first unchecked `- [ ]` step. If it is too big for one run, do a clean slice and add a sub-bullet saying what's left.
 3. **Lean means lean**: fewer files, fewer abstractions, no speculative config or plugin systems, no dead code.
    Prefer deleting to adding. Plain functions over classes. A newcomer should understand any module in one read.
@@ -38,7 +38,7 @@ README must come from a real run that is in the repo.
 
 - [x] **0. Baseline under git.** `git init`, a sensible `.gitignore` (runs/, cache/, models/, .venv, .lake, *.log,
       generated html), commit the current prototype as-is, tag `v0-prototype`. Record current test status.
-- [ ] **1. Make it lean.** Target layout:
+- [x] **1. Make it lean.** Target layout:
       ```
       mathfinder/      core: lean.py, llm.py, prover.py, search.py, planner.py, formalize.py, ...
       server/          FastAPI app + WebSocket

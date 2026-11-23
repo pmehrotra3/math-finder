@@ -2,7 +2,8 @@
 
   0. maybe the hammer proves the whole theorem directly (or refutes it)
   1. the planner proposes a few plans
-  2. the critic throws out plans that don't fit together (one Lean run)
+  2. the critic throws out plans that don't fit together: every lemma is assumed
+     (`sorry`) and the main proof must compile on top of them (one Lean run for all plans)
   3. remaining plans are tried cheapest-first (fewest lemmas); each lemma goes to
      the prover, and a refuted lemma kills its plan immediately
   4. a plan with every lemma proved is assembled into one file and checked by
@@ -23,17 +24,59 @@ an "attempt" event for every single proof attempt, failed ones too.
 """
 
 import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from mathfinder.critic import check_skeletons
 from mathfinder.hammer import hammer
-from mathfinder.lean import verify_final
+from mathfinder.lean import Decl, check_decls, verify_final
 from mathfinder.planner import Lemma, Plan, propose_plans
 from mathfinder.prover import prove_lemma
+from mathfinder.traces import OnEvent
+
+if TYPE_CHECKING:
+    from mathfinder.collab import Session
+
+Emit = Callable[..., None]  # emit(kind, **fields)
 
 NAMESPACE = "MathFinder"
 MAX_DEPTH = 1  # a stuck lemma may get a sub-search; a stuck lemma inside that may not
 MAX_QUESTIONS = 2  # how many times the search may ask the user before giving up
+
+
+# --- the critic -------------------------------------------------------------
+
+FORBIDDEN = ("sorry", "admit", "axiom")
+
+
+def lemma_context(plan: Plan) -> str:
+    """The plan's lemmas as Lean theorems with `sorry` proofs: "pretend these are proved"."""
+    return "\n\n".join(f"theorem {lem.name} {lem.statement} := by\n  sorry" for lem in plan.lemmas)
+
+
+def check_skeletons(theorem: str, plans: list[Plan]) -> list[list[str]]:
+    """For each plan, the list of problems with its skeleton (empty list = the plan fits together)."""
+    problems = [[] for _ in plans]
+    decls = []
+    for i, plan in enumerate(plans):
+        cheat = [w for w in FORBIDDEN if w in plan.main_proof]
+        if cheat:
+            problems[i].append(f"main proof uses forbidden {cheat}")
+            continue
+        decls.append(Decl(f"plan_{i}", theorem, plan.main_proof, context=lemma_context(plan)))
+
+    if decls:
+        results = check_decls(decls)
+        for i in range(len(plans)):
+            result = results.get(f"plan_{i}")
+            if result is not None:
+                # The lemmas use sorry on purpose, so only real errors count here.
+                problems[i].extend(result.errors)
+
+    for plan, found in zip(plans, problems, strict=True):
+        if found:
+            plan.feedback.append("skeleton does not compile: " + " | ".join(e[:300] for e in found))
+    return problems
 
 
 @dataclass
@@ -48,9 +91,9 @@ class SearchResult:
 def assemble(theorem: str, plan: Plan) -> str:
     """One Lean file: every lemma with its real proof, then the main theorem."""
     blocks = [f"namespace {NAMESPACE}"]
-    for l in plan.lemmas:
-        body = "\n".join("  " + line for line in l.proof.split("\n"))
-        blocks.append(f"theorem {l.name} {l.statement} := by\n{body}")
+    for lem in plan.lemmas:
+        body = "\n".join("  " + line for line in lem.proof.split("\n"))
+        blocks.append(f"theorem {lem.name} {lem.statement} := by\n{body}")
     main_body = "\n".join("  " + line for line in plan.main_proof.split("\n"))
     blocks.append(f"theorem main {theorem} := by\n{main_body}")
     blocks.append(f"end {NAMESPACE}")
@@ -59,19 +102,19 @@ def assemble(theorem: str, plan: Plan) -> str:
 
 def score(plan: Plan) -> float:
     """Fraction of lemmas proved; a refuted lemma makes the whole plan worthless."""
-    if any(l.status == "refuted" for l in plan.lemmas):
+    if any(lem.status == "refuted" for lem in plan.lemmas):
         return -1.0
     if not plan.lemmas:
         return 0.0
-    return sum(l.status == "proved" for l in plan.lemmas) / len(plan.lemmas)
+    return sum(lem.status == "proved" for lem in plan.lemmas) / len(plan.lemmas)
 
 
 def summarize(plan: Plan) -> str:
     """What happened to one plan, written for the planner's next round."""
     lines = [f"Plan: {plan.sketch}  (main proof: {plan.main_proof!r})"]
     lines += [f"  - {note}" for note in plan.feedback]
-    for l in plan.lemmas:
-        lines.append(f"  - lemma {l.name} {l.statement}: {l.status.upper()}  {l.feedback[:300]}")
+    for lem in plan.lemmas:
+        lines.append(f"  - lemma {lem.name} {lem.statement}: {lem.status.upper()}  {lem.feedback[:300]}")
     return "\n".join(lines)
 
 
@@ -79,7 +122,7 @@ def splice(plan: Plan, lemma: Lemma, sub: Plan) -> int:
     """Put a sub-search's lemmas into `plan` just before `lemma`, and use the sub-search's
     main proof as `lemma`'s proof. Sub-lemmas are renamed `<lemma>_<name>` so names stay
     unique. Returns how many lemmas were inserted."""
-    renames = {l.name: f"{lemma.name}_{l.name}" for l in sub.lemmas}
+    renames = {lem.name: f"{lemma.name}_{lem.name}" for lem in sub.lemmas}
 
     def rename(text: str) -> str:
         for old, new in renames.items():
@@ -87,8 +130,8 @@ def splice(plan: Plan, lemma: Lemma, sub: Plan) -> int:
         return text
 
     inserted = [
-        Lemma(renames[l.name], rename(l.statement), l.informal, "proved", rename(l.proof), "from sub-search")
-        for l in sub.lemmas
+        Lemma(renames[lem.name], rename(lem.statement), lem.informal, "proved", rename(lem.proof), "from sub-search")
+        for lem in sub.lemmas
     ]
     i = plan.lemmas.index(lemma)
     plan.lemmas[i:i] = inserted  # slice assignment: insert the list at position i
@@ -96,7 +139,14 @@ def splice(plan: Plan, lemma: Lemma, sub: Plan) -> int:
     return len(inserted)
 
 
-def prove_plan(plan: Plan, emit, on_event=None, hints=(), depth: int = 0, session=None) -> bool:
+def prove_plan(
+    plan: Plan,
+    emit: Emit,
+    on_event: OnEvent | None = None,
+    hints: Sequence[str] = (),
+    depth: int = 0,
+    session: "Session | None" = None,
+) -> bool:
     """Prove the plan's lemmas in order. Stops at the first refuted lemma.
     A stuck lemma gets a sub-search while depth < MAX_DEPTH."""
     i = 0
@@ -115,23 +165,23 @@ def prove_plan(plan: Plan, emit, on_event=None, hints=(), depth: int = 0, sessio
         if lemma.status == "refuted":
             return False
         i += 1
-    return all(l.status == "proved" for l in plan.lemmas)
+    return all(lem.status == "proved" for lem in plan.lemmas)
 
 
 def build_question(theorem: str, best: Plan | None) -> str:
     """A specific question for the user: the step we're stuck on, and what Lean said."""
-    stuck = [l for l in best.lemmas if l.status == "stuck"] if best else []
+    stuck = [lem for lem in best.lemmas if lem.status == "stuck"] if best else []
     if stuck:
-        l = stuck[0]
+        lem = stuck[0]
         return (
-            f"I can't prove this step:\n  {l.name} : {l.statement}\n"
-            f"Lean said: {l.feedback[:300]}\n"
+            f"I can't prove this step:\n  {lem.name} : {lem.statement}\n"
+            f"Lean said: {lem.feedback[:300]}\n"
             "Any idea how to prove it, or a different approach to the whole theorem?"
         )
     return f"I couldn't find a proof of\n  {theorem}\nWhich approach would you try?"
 
 
-def try_direct(theorem: str, emit) -> SearchResult | None:
+def try_direct(theorem: str, emit: Emit) -> SearchResult | None:
     """Step 0: maybe automation proves (or refutes) the whole theorem."""
     hit = hammer(theorem)
     if hit.counterexample:
@@ -148,22 +198,22 @@ def try_direct(theorem: str, emit) -> SearchResult | None:
 
 def search(
     theorem: str,
-    hints=(),
+    hints: Sequence[str] = (),
     rounds: int = 3,
     plans_per_round: int = 2,
-    on_event=None,
+    on_event: OnEvent | None = None,
     depth: int = 0,
-    session=None,
+    session: "Session | None" = None,
 ) -> SearchResult:
     """Search for a verified proof of `theorem` (a Lean statement without a name).
     `depth` is 0 for the user's theorem, 1 for a sub-search on a stuck lemma, ...
     `session` (optional) is a collab.Session shared with the user."""
 
-    def emit(kind, **data):
+    def emit(kind: str, **data) -> None:
         if on_event:
             on_event({"kind": kind, "depth": depth, **data})
 
-    def stop_reason():
+    def stop_reason() -> str | None:
         reason = session.checkpoint() if session else None
         if reason:
             emit("stopped", reason=reason)
@@ -204,7 +254,7 @@ def search(
         problems = check_skeletons(theorem, plans)
 
         fitting = []
-        for plan, found in zip(plans, problems):
+        for plan, found in zip(plans, problems, strict=True):
             rejected = session.uses_rejected(plan) if session else None
             if found:
                 emit("plan_rejected", sketch=plan.sketch, reason=found[0][:300])
@@ -217,7 +267,7 @@ def search(
         for plan in sorted(fitting, key=lambda p: len(p.lemmas)):  # cheapest first
             if stop_reason():
                 return SearchResult(False, plan=best, rounds=r, message=f"stopped: {session.checkpoint()}")
-            emit("plan_start", sketch=plan.sketch, lemmas=[l.name for l in plan.lemmas])
+            emit("plan_start", sketch=plan.sketch, lemmas=[lem.name for lem in plan.lemmas])
             if prove_plan(plan, emit, on_event, all_hints, depth, session):
                 code = assemble(theorem, plan)
                 final = verify_final(code, f"{NAMESPACE}.main")

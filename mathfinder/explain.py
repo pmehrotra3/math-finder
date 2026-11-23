@@ -28,7 +28,7 @@ Reply with the Markdown only."""
 
 
 def build_prompt(theorem: str, plan: Plan, lean_code: str) -> str:
-    lemma_lines = "\n".join(f"- `{l.name}`: {l.informal or l.statement}" for l in plan.lemmas) or "- (none)"
+    lemma_lines = "\n".join(f"- `{lem.name}`: {lem.informal or lem.statement}" for lem in plan.lemmas) or "- (none)"
     return (
         f"Theorem (as the user wrote it):\n{theorem}\n\n"
         f"Proof idea from the planner: {plan.sketch}\n\n"
@@ -39,7 +39,7 @@ def build_prompt(theorem: str, plan: Plan, lean_code: str) -> str:
 
 def missing_steps(markdown: str, plan: Plan) -> list[str]:
     """Lean names that the explanation never mentions as `name`."""
-    names = [l.name for l in plan.lemmas] + ["main"]
+    names = [lem.name for lem in plan.lemmas] + ["main"]
     return [n for n in names if f"`{n}`" not in markdown]
 
 

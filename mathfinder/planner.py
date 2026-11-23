@@ -7,6 +7,7 @@ which step of the idea is broken.
 """
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from mathfinder import llm
@@ -64,25 +65,25 @@ def build_prompt(theorem: str, n: int, hints: list[str], feedback: str) -> str:
     return "\n\n".join(parts)
 
 
-def parse_plans(data) -> list[Plan]:
+def parse_plans(data: object) -> list[Plan]:
     """Turn the model's JSON into Plan objects, dropping any plan that is malformed."""
     plans = []
     for raw in data.get("plans", []) if isinstance(data, dict) else []:
         try:
             lemmas = [
-                Lemma(name=l["name"].strip(), statement=l["statement"].strip(), informal=l.get("informal", ""))
-                for l in raw.get("lemmas", [])
+                Lemma(name=lem["name"].strip(), statement=lem["statement"].strip(), informal=lem.get("informal", ""))
+                for lem in raw.get("lemmas", [])
             ]
             plan = Plan(sketch=raw.get("sketch", ""), lemmas=lemmas, main_proof=raw["main_proof"].strip())
         except (KeyError, AttributeError, TypeError):
             continue  # missing field or wrong type: skip this plan
-        names = [l.name for l in lemmas]
+        names = [lem.name for lem in lemmas]
         if all(NAME_RE.match(n) for n in names) and len(set(names)) == len(names) and plan.main_proof:
             plans.append(plan)
     return plans
 
 
-def propose_plans(theorem: str, n: int = 2, hints: list[str] = (), feedback: str = "") -> list[Plan]:
+def propose_plans(theorem: str, n: int = 2, hints: Sequence[str] = (), feedback: str = "") -> list[Plan]:
     """Ask Claude for `n` plans to prove `theorem` (a Lean statement without a name)."""
     data = llm.complete_json(SYSTEM, build_prompt(theorem, n, list(hints), feedback))
     return parse_plans(data)

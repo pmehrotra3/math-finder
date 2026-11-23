@@ -5,18 +5,18 @@ already written as Lean statements, one JSON object per line:
   {"name": "...", "topic": "...", "statement": "..."}
 
 `run_bench` runs the full search on each one and records what happened. Every run
-is also traced (runs/bench-<time>/<name>/trace.jsonl), so the benchmark doubles as
-a source of training data. Results go to bench/results/<time>.json and .md.
+is also traced (runs/bench-<time>/<name>/trace.jsonl). Results go to bench/results/<time>.json and .md.
 """
 
 import json
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
 from mathfinder import PROJECT_ROOT
 from mathfinder.optimize import proof_stats
-from mathfinder.search import search
+from mathfinder.search import SearchResult, search
 from mathfinder.traces import TraceLogger, chain
 
 PROBLEMS_FILE = PROJECT_ROOT / "bench" / "problems.jsonl"
@@ -28,7 +28,7 @@ def load_problems(path: Path = PROBLEMS_FILE) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def how_it_was_proved(result) -> str:
+def how_it_was_proved(result: SearchResult) -> str:
     if not result.proved:
         return result.message
     if result.rounds == 0:
@@ -45,8 +45,14 @@ def run_one(problem: dict, rounds: int, run_dir: Path) -> dict:
         result = search(problem["statement"], rounds=rounds, on_event=chain(events.append, logger))
     except Exception as e:  # one broken problem must not stop the whole benchmark
         logger.finish(False, [])
-        return {**problem, "proved": False, "seconds": round(time.time() - start), "how": f"crash: {e}",
-                "attempts": 0, "steps": None}
+        return {
+            **problem,
+            "proved": False,
+            "seconds": round(time.time() - start),
+            "how": f"crash: {e}",
+            "attempts": 0,
+            "steps": None,
+        }
     logger.finish(result.proved, [])
     attempts = [e for e in events if e["kind"] == "attempt"]
     return {
@@ -73,13 +79,16 @@ def results_table(rows: list[dict]) -> str:
         mark = "✓ proved" if r["proved"] else "✗ not proved"
         lines.append(f"| {i} | `{r['name']}` | {r['topic']} | {mark} | {r['seconds']} s | {r['how'][:90]} |")
     topics = sorted({r["topic"] for r in rows})
-    by_topic = ", ".join(f"{t} {sum(r['proved'] for r in rows if r['topic'] == t)}/"
-                         f"{sum(r['topic'] == t for r in rows)}" for t in topics)
+    by_topic = ", ".join(
+        f"{t} {sum(r['proved'] for r in rows if r['topic'] == t)}/{sum(r['topic'] == t for r in rows)}" for t in topics
+    )
     lines += ["", f"By topic: {by_topic}"]
     return "\n".join(lines)
 
 
-def run_bench(problems: list[dict], rounds: int = 2, on_progress=print) -> tuple[list[dict], Path]:
+def run_bench(
+    problems: list[dict], rounds: int = 2, on_progress: Callable[[str], None] = print
+) -> tuple[list[dict], Path]:
     """Run every problem, save the results, return (rows, path of the .md file)."""
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = RUNS_DIR / f"bench-{stamp}"

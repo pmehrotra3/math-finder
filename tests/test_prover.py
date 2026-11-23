@@ -68,8 +68,7 @@ def test_preamble_uses_real_proofs_when_known():
     done = Lemma("a", ": 1 = 1", "", status="proved", proof="rfl")
     open_ = Lemma("b", ": 2 = 2", "")
     assert prover.preamble_for([done, open_]) == (
-        "namespace MathFinder\n\n"
-        "theorem a : 1 = 1 := by\n  rfl\n\ntheorem b : 2 = 2 := by\n  sorry"
+        "namespace MathFinder\n\ntheorem a : 1 = 1 := by\n  rfl\n\ntheorem b : 2 = 2 := by\n  sorry"
     )
     assert prover.preamble_for([]) == ""
 
@@ -90,7 +89,9 @@ def test_false_lemma_is_refuted_without_asking_the_model(scripted_model):
 def test_repair_round_fixes_a_wrong_proof_then_cache_reuses_it(scripted_model):
     prompts = scripted_model([WRONG], [GOOD])
     attempts = []
-    lemma = prover.prove_lemma(Lemma("odd_sum", ODD_SUM, "sum of the first n odd numbers is n^2"), on_attempt=attempts.append)
+    lemma = prover.prove_lemma(
+        Lemma("odd_sum", ODD_SUM, "sum of the first n odd numbers is n^2"), on_attempt=attempts.append
+    )
     assert lemma.status == "proved", lemma.feedback
     assert [(a["proof"], a["ok"], a["source"]) for a in attempts] == [(WRONG, False, "llm"), (GOOD, True, "repair")]
     assert attempts[0]["error"]  # the failure is logged WITH Lean's error

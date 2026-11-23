@@ -9,10 +9,20 @@ from mathfinder.planner import Lemma, Plan
 PLAN = Plan(
     "Write a/b + b/a - 2 as (a-b)^2/(ab), which is nonnegative.",
     [
-        Lemma("diff_identity", "(a b : ℝ) (ha : 0 < a) (hb : 0 < b) : a / b + b / a - 2 = (a - b) ^ 2 / (a * b)",
-              "a/b + b/a - 2 = (a-b)^2/(ab)", status="proved", proof="field_simp\nring"),
-        Lemma("frac_sq_nonneg", "(a b : ℝ) (ha : 0 < a) (hb : 0 < b) : 0 ≤ (a - b) ^ 2 / (a * b)",
-              "(a-b)^2/(ab) is nonnegative", status="proved", proof="positivity"),
+        Lemma(
+            "diff_identity",
+            "(a b : ℝ) (ha : 0 < a) (hb : 0 < b) : a / b + b / a - 2 = (a - b) ^ 2 / (a * b)",
+            "a/b + b/a - 2 = (a-b)^2/(ab)",
+            status="proved",
+            proof="field_simp\nring",
+        ),
+        Lemma(
+            "frac_sq_nonneg",
+            "(a b : ℝ) (ha : 0 < a) (hb : 0 < b) : 0 ≤ (a - b) ^ 2 / (a * b)",
+            "(a-b)^2/(ab) is nonnegative",
+            status="proved",
+            proof="positivity",
+        ),
     ],
     "have h1 := diff_identity a b ha hb\nhave h2 := frac_sq_nonneg a b ha hb\nlinarith",
 )

@@ -20,6 +20,7 @@ from mathfinder.lean import Decl, check_decls, verify_final
 from mathfinder.planner import Plan
 from mathfinder.prover import parse_proofs
 from mathfinder.search import NAMESPACE, assemble
+from mathfinder.traces import OnEvent
 
 CANDIDATES = 4
 HEAVY = ("nlinarith", "polyrith", "aesop", "simp_all", "decide", "exact?")
@@ -75,10 +76,12 @@ def build_prompt(theorem: str, lean_code: str, metric: str) -> str:
     )
 
 
-def optimize(theorem: str, lean_code: str, plan: Plan, metric: str = "short", on_event=None) -> Optimization:
+def optimize(
+    theorem: str, lean_code: str, plan: Plan, metric: str = "short", on_event: OnEvent | None = None
+) -> Optimization:
     """Try to find a better verified proof than `lean_code` under `metric`."""
 
-    def emit(kind, **data):
+    def emit(kind: str, **data) -> None:
         if on_event:
             on_event({"kind": kind, "depth": 0, **data})
 
