@@ -1,6 +1,6 @@
 # Math Finder: from prototype to a hostable, lean repository
 
-You run every 40 minutes. Each run: do **one** unchecked step below (or the next slice of it),
+Each time this prompt is run: do **one** unchecked step below (or the next slice of it),
 verify it, tick it, log it, commit. Then stop. Keep each run under ~35 minutes of work.
 
 ## The target (what "done" looks like)
@@ -16,7 +16,7 @@ README must come from a real run that is in the repo.
 
 ## Rules (every run)
 
-1. Start by reading this file, then the last ~40 lines of `docs/DEVLOG.md` (or `PROGRESS.md` before step 1 moves it).
+1. Start by reading this file, then the last ~40 lines of `docs/DEVLOG.md` (or `PROGRESS.md` before step 1 moves it). This file (`prompt.md`) is the plan and checklist: tick steps here.
 2. Pick the first unchecked `- [ ]` step. If it is too big for one run, do a clean slice and add a sub-bullet saying what's left.
 3. **Lean means lean**: fewer files, fewer abstractions, no speculative config or plugin systems, no dead code.
    Prefer deleting to adding. Plain functions over classes. A newcomer should understand any module in one read.

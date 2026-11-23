@@ -592,7 +592,7 @@ Verified: `uv run pytest -q tests/test_bench.py` → `5 passed in 32.25s` (incl.
 ## ALL MILESTONES (M0–M13) DONE AND VERIFIED — the loop can be stopped (cron job 61ff8dc4).
 
 ---
-# Productionization loop (see .claude/loop.md)
+# Productionization loop (see prompt.md)
 
 ### 2026-11-22 — Step 0: baseline under git
 - `git init -b main`; extended .gitignore (*.log, lean_env/.lake/, .claude/settings.local.json, scheduler lock).
