@@ -1,31 +1,22 @@
-"""The benchmark: how good is Math Finder, really?
+"""The benchmark: run the full search on every problem in bench/problems.jsonl.
 
-bench/problems.jsonl holds competition-style problems (in the spirit of miniF2F),
-already written as Lean statements, one JSON object per line:
-  {"name": "...", "topic": "...", "statement": "..."}
-
-`run_bench` runs the full search on each one and records what happened. Every run
-is also traced (runs/bench-<time>/<name>/trace.jsonl). Results go to bench/results/<time>.json and .md.
+Traces and a results table go to runs/bench-<date-time>/.
 """
 
 import json
 import time
-from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
 from mathfinder import PROJECT_ROOT
-from mathfinder.optimize import proof_stats
+from mathfinder.pipeline import RUNS_DIR, tracer
 from mathfinder.search import SearchResult, search
-from mathfinder.traces import TraceLogger, chain
 
 PROBLEMS_FILE = PROJECT_ROOT / "bench" / "problems.jsonl"
-RESULTS_DIR = PROJECT_ROOT / "bench" / "results"
-RUNS_DIR = PROJECT_ROOT / "runs"
 
 
-def load_problems(path: Path = PROBLEMS_FILE) -> list[dict]:
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+def load_problems() -> list[dict]:
+    return [json.loads(line) for line in PROBLEMS_FILE.read_text().splitlines() if line.strip()]
 
 
 def how_it_was_proved(result: SearchResult) -> str:
@@ -36,33 +27,16 @@ def how_it_was_proved(result: SearchResult) -> str:
     return f"plan with {len(result.plan.lemmas)} lemma(s), round {result.rounds}"
 
 
-def run_one(problem: dict, rounds: int, run_dir: Path) -> dict:
+def run_one(problem: dict, rounds: int, folder: Path) -> dict:
     """Search for a proof of one problem; return a results row."""
-    events = []
-    logger = TraceLogger(run_dir / problem["name"], problem["statement"])
+    folder.mkdir(parents=True)
     start = time.time()
     try:
-        result = search(problem["statement"], rounds=rounds, on_event=chain(events.append, logger))
+        result = search(problem["statement"], rounds=rounds, on_event=tracer(folder))
+        proved, how = result.proved, how_it_was_proved(result)
     except Exception as e:  # one broken problem must not stop the whole benchmark
-        logger.finish(False, [])
-        return {
-            **problem,
-            "proved": False,
-            "seconds": round(time.time() - start),
-            "how": f"crash: {e}",
-            "attempts": 0,
-            "steps": None,
-        }
-    logger.finish(result.proved, [])
-    attempts = [e for e in events if e["kind"] == "attempt"]
-    return {
-        **problem,
-        "proved": result.proved,
-        "seconds": round(time.time() - start),
-        "how": how_it_was_proved(result),
-        "attempts": len(attempts),
-        "steps": proof_stats(result.lean_code)["steps"] if result.proved else None,
-    }
+        proved, how = False, f"crash: {e}"
+    return {**problem, "proved": proved, "seconds": round(time.time() - start), "how": how}
 
 
 def results_table(rows: list[dict]) -> str:
@@ -86,21 +60,14 @@ def results_table(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def run_bench(
-    problems: list[dict], rounds: int = 2, on_progress: Callable[[str], None] = print
-) -> tuple[list[dict], Path]:
-    """Run every problem, save the results, return (rows, path of the .md file)."""
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir = RUNS_DIR / f"bench-{stamp}"
+def run_bench(problems: list[dict], rounds: int = 2) -> Path:
+    """Run every problem; return the path of the results table."""
+    folder = RUNS_DIR / f"bench-{datetime.now():%Y%m%d-%H%M%S}"
     rows = []
     for i, problem in enumerate(problems, 1):
-        on_progress(f"[{i}/{len(problems)}] {problem['name']}: {problem['statement']}")
-        row = run_one(problem, rounds, run_dir)
-        rows.append(row)
-        on_progress(f"    {'✓ proved' if row['proved'] else '✗ not proved'} in {row['seconds']} s  ({row['how'][:80]})")
-
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    (RESULTS_DIR / f"{stamp}.json").write_text(json.dumps(rows, indent=2, ensure_ascii=False))
-    md_path = RESULTS_DIR / f"{stamp}.md"
-    md_path.write_text(results_table(rows) + "\n")
-    return rows, md_path
+        print(f"[{i}/{len(problems)}] {problem['name']}: {problem['statement']}", flush=True)
+        rows.append(run_one(problem, rounds, folder / problem["name"]))
+        print(f"    {'✓ proved' if rows[-1]['proved'] else '✗ not proved'} in {rows[-1]['seconds']} s", flush=True)
+    path = folder / "results.md"
+    path.write_text(results_table(rows) + "\n")
+    return path

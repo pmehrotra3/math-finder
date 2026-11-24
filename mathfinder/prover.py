@@ -1,8 +1,8 @@
 """The prover: get ONE lemma proved, as cheaply as possible.
 
   1. cache   - proved this exact lemma before? reuse it, free
-  2. hammer  - a dozen automatic tactics in one Lean run, no AI
-               (also finds counterexamples: then the lemma is false, stop)
+  2. hammer  - many automatic tactics in ONE Lean run, no AI; `plausible` also looks
+               for a counterexample (then the lemma is false, stop)
   3. LLM     - ask Claude for several proofs, check them all in ONE Lean run
   4. repair  - show Claude its failed proofs WITH Lean's error messages, ask for fixes
 
@@ -15,10 +15,10 @@ Every attempt, failed ones included, can be reported to an `on_attempt` callback
 
 import json
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 from mathfinder import PROJECT_ROOT, llm
-from mathfinder.hammer import hammer
-from mathfinder.lean import Decl, check_decls
+from mathfinder.lean import FORBIDDEN, Decl, check_decls, render_theorem
 from mathfinder.planner import Lemma
 
 CACHE_FILE = PROJECT_ROOT / "cache" / "lemmas.json"
@@ -34,6 +34,82 @@ Rules:
 - You may use the earlier lemmas listed, by name.
 - Each proof should be a genuinely different approach.
 Reply with ONLY a JSON object inside a ```json block: {"proofs": ["<tactic script>", ...]}"""
+
+
+# ---------- hammer ----------
+
+# Roughly from fastest/most specific to slowest/most general.
+TACTICS = [
+    "norm_num",
+    "simp",
+    "omega",
+    "decide",
+    "linarith",
+    "nlinarith",
+    "positivity",
+    "ring_nf",
+    "field_simp",
+    "aesop",
+    "tauto",
+    "simp_all",
+    "norm_num <;> nlinarith",  # simplify the numbers first, then nonlinear arithmetic
+    "exact?",  # searches the whole library: slowest, so last
+]
+HAMMER_HEARTBEATS = 100_000  # less fuel than normal: if a tactic doesn't work fast, it won't work
+
+
+@dataclass
+class HammerResult:
+    proved: bool
+    tactic: str = ""  # the tactic that worked
+    proof: str = ""  # proof text to keep (for exact?, the lemma it found)
+    counterexample: str = ""  # e.g. "n := 4; issue: 16 ≤ 11 does not hold"
+
+
+def hammer(
+    statement: str,
+    preamble: str = "",
+    tactics: Sequence[str] = TACTICS,
+) -> HammerResult:
+    """Try every tactic on `statement`, plus a counterexample search, in ONE Lean run."""
+    decls = [Decl(f"mf_hammer_{i}", statement, tac) for i, tac in enumerate(tactics)]
+    decls.append(Decl("mf_refute", statement, "plausible"))
+    results = check_decls(decls, preamble, heartbeats=HAMMER_HEARTBEATS)
+
+    out = HammerResult(proved=False)
+    for i, tac in enumerate(tactics):
+        if results[f"mf_hammer_{i}"].ok:
+            out.proved = True
+            out.tactic = tac
+            out.proof = tac
+            if tac == "exact?":  # keep the lemma it found, not the slow search
+                out.proof = suggestion(results[f"mf_hammer_{i}"].infos) or tac
+            break
+
+    for err in results["mf_refute"].errors:
+        if "Found a counter-example!" in err:
+            out.counterexample = counterexample_text(err)
+    return out
+
+
+def counterexample_text(error: str) -> str:
+    """Turn plausible's report into one line, e.g. 'n := 4; issue: 16 ≤ 11 does not hold'."""
+    after = error.split("Found a counter-example!", 1)[1]
+    lines = []
+    for line in after.strip().split("\n"):
+        if line.startswith("---") or line.startswith("("):  # end marker / "(0 shrinks)"
+            break
+        lines.append(line.strip())
+    return "; ".join(lines)
+
+
+def suggestion(infos: list[str]) -> str:
+    """Read 'Try this: [apply] exact Nat.add_comm a b' and return 'exact Nat.add_comm a b'."""
+    for text in infos:
+        if text.startswith("Try this:"):
+            found = text.split(":", 1)[1].strip()
+            return found.removeprefix("[apply]").strip()
+    return ""
 
 
 # ---------- cache ----------
@@ -69,12 +145,9 @@ def preamble_for(earlier: list[Lemma]) -> str:
     """
     if not earlier:
         return ""
-    parts = []
-    for lem in earlier:
-        proof = lem.proof if lem.status == "proved" else "sorry"
-        body = "\n".join("  " + line for line in proof.split("\n"))
-        parts.append(f"theorem {lem.name} {lem.statement} := by\n{body}")
-    return "namespace MathFinder\n\n" + "\n\n".join(parts)
+    return "namespace MathFinder\n\n" + "\n\n".join(
+        render_theorem(lem.name, lem.statement, lem.proof if lem.status == "proved" else "sorry") for lem in earlier
+    )
 
 
 def build_prompt(lemma: Lemma, earlier: list[Lemma], failures: Sequence[tuple[str, str]] = ()) -> str:
@@ -103,7 +176,7 @@ def parse_proofs(data: object) -> list[str]:
         p = p.strip()
         if p.startswith("by"):
             p = p[2:].strip()
-        if any(word in p for word in ("sorry", "admit", "axiom")):
+        if any(word in p for word in FORBIDDEN):
             continue
         proofs.append(p)
     return proofs
@@ -143,7 +216,6 @@ def try_proofs(
 def prove_lemma(
     lemma: Lemma,
     earlier: Sequence[Lemma] = (),
-    use_cache: bool = True,
     on_attempt: Callable[[dict], None] | None = None,
 ) -> Lemma:
     """Try to prove `lemma` (which may use the `earlier` lemmas). Updates and returns it.
@@ -165,8 +237,8 @@ def prove_lemma(
                 }
             )
 
-    if use_cache and key in load_cache():
-        lemma.status, lemma.proof, lemma.feedback = "proved", load_cache()[key], "from cache"
+    if cached := load_cache().get(key):
+        lemma.status, lemma.proof, lemma.feedback = "proved", cached, "from cache"
         return lemma
 
     preamble = preamble_for(earlier)

@@ -52,9 +52,8 @@ def test_prompt_puts_user_hints_first_class():
     assert "plan 1 failed" in prompt
 
 
-def test_propose_plans_with_fake_llm(monkeypatch):
-    monkeypatch.setitem(llm.BACKENDS, "fake", lambda system, prompt: GOOD_JSON)
-    monkeypatch.setenv("MATHFINDER_LLM", "fake")
+def test_propose_plans_with_fake_llm(fake_llm):
+    fake_llm(GOOD_JSON)
     plans = propose_plans(AMGM)
     assert [p.sketch for p in plans] == ["Square of a difference is nonnegative."]
 

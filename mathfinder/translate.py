@@ -1,8 +1,9 @@
-"""Formalization: turn a theorem written in LaTeX into a Lean statement you can trust.
+"""Translate between mathematics for people and Lean, in both directions.
 
-This is the most dangerous step in the whole system: Lean will happily prove a
-statement that doesn't say what you meant. (On ℕ, 2 - 5 = 0. Forget "n ≥ 1" and
-the claim changes.) So we use three separate checks before any search starts:
+`formalize` turns a LaTeX theorem into a Lean statement. This is the most dangerous step
+in the whole system: Lean will happily prove a statement that doesn't say what you meant.
+(On ℕ, 2 - 5 = 0. Forget "n ≥ 1" and the claim changes.) So we use three separate checks
+before any search starts:
 
   1. Lean must accept the statement (it type-checks, with `sorry` as the proof)
   2. a SEPARATE model call translates the Lean back into LaTeX without seeing your
@@ -10,12 +11,16 @@ the claim changes.) So we use three separate checks before any search starts:
   3. a judge compares your LaTeX with that back-translation
 
 And then YOU approve it. Nothing is proved until a person says "yes, that's my theorem".
+
+`explain` turns a verified Lean proof back into readable math: one step per lemma, each
+tagged with its Lean name.
 """
 
 from dataclasses import dataclass, field
 
 from mathfinder import llm
 from mathfinder.lean import statement_errors
+from mathfinder.planner import Plan
 
 REPAIR_ROUNDS = 2
 
@@ -99,3 +104,52 @@ def judge(original: str, back_translation: str) -> tuple[bool, str]:
         f"Original:\n{original}\n\nLiteral translation of the formal statement:\n{back_translation}",
     )
     return verdict.get("same_meaning") is True, str(verdict.get("reason", ""))
+
+
+SYSTEM_EXPLAIN = """You explain formal Lean 4 proofs to people, in plain mathematics.
+Write Markdown with LaTeX math ($...$ inline, $$...$$ for displays). Use exactly this structure:
+
+## Theorem
+The statement, in LaTeX.
+
+## Idea
+One to three sentences: the key insight.
+
+## Proof
+One numbered step per lemma, in order, each starting with **Step k** (`lemma_name`),
+then a final step starting with **Conclusion** (`main`) that combines them.
+In each step say WHAT is shown and WHY it is true, the way a careful textbook would.
+Mention a Lean tactic only if it helps the reader (e.g. "by induction on n").
+
+Rules: explain only what the Lean proof actually does. Do not invent steps it doesn't take.
+Reply with the Markdown only."""
+
+
+def explain_prompt(theorem: str, plan: Plan, lean_code: str) -> str:
+    lemma_lines = "\n".join(f"- `{lem.name}`: {lem.informal or lem.statement}" for lem in plan.lemmas) or "- (none)"
+    return (
+        f"Theorem (as the user wrote it):\n{theorem}\n\n"
+        f"Proof idea from the planner: {plan.sketch}\n\n"
+        f"Lemmas, in order:\n{lemma_lines}\n\n"
+        f"The complete Lean proof, verified by Lean:\n```lean\n{lean_code}\n```"
+    )
+
+
+def missing_steps(markdown: str, plan: Plan) -> list[str]:
+    """Lean names that the explanation never mentions as `name`."""
+    names = [lem.name for lem in plan.lemmas] + ["main"]
+    return [n for n in names if f"`{n}`" not in markdown]
+
+
+def explain(theorem: str, plan: Plan, lean_code: str) -> str:
+    """A Markdown explanation of a verified proof. Asks once more if it skipped a lemma."""
+    prompt = explain_prompt(theorem, plan, lean_code)
+    markdown = llm.complete(SYSTEM_EXPLAIN, prompt)
+    missing = missing_steps(markdown, plan)
+    if missing:
+        markdown = llm.complete(
+            SYSTEM_EXPLAIN,
+            f"{prompt}\n\nYour previous explanation had no step for: {', '.join(missing)}. "
+            "Write it again with one step for every lemma, tagged with its name in backticks.",
+        )
+    return markdown

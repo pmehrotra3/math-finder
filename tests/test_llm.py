@@ -11,27 +11,8 @@ import pytest
 from mathfinder import llm
 
 
-@pytest.fixture
-def fake_replies(monkeypatch):
-    """Install a fake backend that returns the given replies in order."""
-
-    def install(*replies):
-        queue = list(replies)
-        calls = []
-
-        def fake(system, prompt):
-            calls.append(prompt)
-            return queue.pop(0)
-
-        monkeypatch.setitem(llm.BACKENDS, "fake", fake)
-        monkeypatch.setenv("MATHFINDER_LLM", "fake")
-        return calls
-
-    return install
-
-
-def test_complete_uses_the_backend_from_the_env_var(fake_replies):
-    fake_replies("hello")
+def test_complete_uses_the_backend_from_the_env_var(fake_llm):
+    fake_llm("hello")
     assert llm.complete("sys", "hi") == "hello"
 
 
@@ -56,8 +37,8 @@ def test_extract_json_failure_raises():
         llm.extract_json("no json at all")
 
 
-def test_complete_json_retries_after_bad_json(fake_replies):
-    calls = fake_replies("oops, not json", '```json\n{"fixed": 1}\n```')
+def test_complete_json_retries_after_bad_json(fake_llm):
+    calls = fake_llm("oops, not json", '```json\n{"fixed": 1}\n```')
     assert llm.complete_json("sys", "give json") == {"fixed": 1}
     assert len(calls) == 2
     assert "could not be parsed" in calls[1]

@@ -18,7 +18,7 @@ from mathfinder.planner import Lemma, Plan
 
 
 def test_hints_lemmas_and_pins_become_planner_hints():
-    s = Session("(n : ℕ) : P n")
+    s = Session()
     s.add_hint("try induction on n")
     s.add_lemma("key", "(n : ℕ) : Q n", "Q always holds")
     s.pin("strong induction")
@@ -29,7 +29,7 @@ def test_hints_lemmas_and_pins_become_planner_hints():
 
 
 def test_rejected_lemma_is_found_by_name_or_statement():
-    s = Session("t")
+    s = Session()
     s.reject_lemma("bad")
     s.reject_lemma("(x : ℝ)   :  x = 0")  # spacing doesn't matter
     good = Plan("", [Lemma("fine", ": True", "")], "")
@@ -41,7 +41,7 @@ def test_rejected_lemma_is_found_by_name_or_statement():
 
 
 def test_pause_blocks_the_checkpoint_until_resume():
-    s = Session("t")
+    s = Session()
     s.pause()
     passed = threading.Event()
     threading.Thread(target=lambda: (s.checkpoint(), passed.set()), daemon=True).start()
@@ -52,18 +52,18 @@ def test_pause_blocks_the_checkpoint_until_resume():
 
 
 def test_ask_waits_for_an_answer_from_another_thread():
-    s = Session("t")
+    s = Session()
     threading.Timer(0.1, lambda: s.answer("use AM-GM")).start()
     assert s.ask("Any idea?") == "use AM-GM"
     assert s.question is None
 
 
 def test_ask_gives_up_after_the_timeout():
-    assert Session("t", answer_timeout=0.1).ask("Any idea?") is None
+    assert Session(answer_timeout=0.1).ask("Any idea?") is None
 
 
 def test_stop_wakes_a_paused_search():
-    s = Session("t")
+    s = Session()
     s.pause()
     s.stop()
     assert s.checkpoint() == "stopped by the user"
@@ -107,7 +107,7 @@ def plan(*names):
 
 def test_session_hints_reach_the_planner_and_rejected_plans_are_dropped(fake_world):
     seen_hints = fake_world([[plan("bad_idea"), plan("good_a")]])
-    session = Session("t")
+    session = Session()
     session.add_hint("use induction")
     session.reject_lemma("bad_idea")
     events = []
@@ -120,7 +120,7 @@ def test_session_hints_reach_the_planner_and_rejected_plans_are_dropped(fake_wor
 
 def test_search_asks_the_user_and_the_answer_buys_another_round(fake_world):
     seen_hints = fake_world([[plan("hard_step")], [plan("good_b")]])
-    session = Session("t")
+    session = Session()
     events = []
 
     def user_watches(event):
@@ -137,7 +137,7 @@ def test_search_asks_the_user_and_the_answer_buys_another_round(fake_world):
 
 def test_no_answer_means_giving_up(fake_world):
     fake_world([[plan("hard_step")]])
-    session = Session("t", answer_timeout=0.1)
+    session = Session(answer_timeout=0.1)
     events = []
     result = search_module.search("t", rounds=1, on_event=events.append, session=session)
     assert not result.proved
@@ -145,11 +145,10 @@ def test_no_answer_means_giving_up(fake_world):
     assert kinds[-3:] == ["ask_user", "no_answer", "gave_up"]
 
 
-def test_editing_the_statement_stops_the_search(fake_world):
+def test_stopping_ends_the_search(fake_world):
     fake_world([[plan("good_a")]])
-    session = Session("t")
-    session.edit_statement("(n : ℕ) : n = n")
+    session = Session()
+    session.stop()
     result = search_module.search("t", rounds=1, session=session)
-    assert not result.proved
-    assert result.message == "stopped: the statement was edited"
-    assert session.theorem == "(n : ℕ) : n = n"
+    assert not result.proved and session.stopped
+    assert result.message == "stopped: stopped by the user"

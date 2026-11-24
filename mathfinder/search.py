@@ -19,7 +19,7 @@ read every round, pause/stop are honoured at checkpoints, and before giving up
 the search ASKS you a specific question (your answer buys another round).
 
 Everything that happens is reported through `on_event`, so the command line,
-the web page and the trace logger can all watch the same search. That includes
+the web page and the trace file can all watch the same search. That includes
 an "attempt" event for every single proof attempt, failed ones too.
 """
 
@@ -28,15 +28,14 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mathfinder.hammer import hammer
-from mathfinder.lean import Decl, check_decls, verify_final
+from mathfinder.lean import FORBIDDEN, Decl, check_decls, render_theorem, verify_final
 from mathfinder.planner import Lemma, Plan, propose_plans
-from mathfinder.prover import prove_lemma
-from mathfinder.traces import OnEvent
+from mathfinder.prover import hammer, prove_lemma
 
 if TYPE_CHECKING:
     from mathfinder.collab import Session
 
+OnEvent = Callable[[dict], None]  # receives every search event
 Emit = Callable[..., None]  # emit(kind, **fields)
 
 NAMESPACE = "MathFinder"
@@ -44,14 +43,9 @@ MAX_DEPTH = 1  # a stuck lemma may get a sub-search; a stuck lemma inside that m
 MAX_QUESTIONS = 2  # how many times the search may ask the user before giving up
 
 
-# --- the critic -------------------------------------------------------------
-
-FORBIDDEN = ("sorry", "admit", "axiom")
-
-
 def lemma_context(plan: Plan) -> str:
     """The plan's lemmas as Lean theorems with `sorry` proofs: "pretend these are proved"."""
-    return "\n\n".join(f"theorem {lem.name} {lem.statement} := by\n  sorry" for lem in plan.lemmas)
+    return "\n\n".join(render_theorem(lem.name, lem.statement, "sorry") for lem in plan.lemmas)
 
 
 def check_skeletons(theorem: str, plans: list[Plan]) -> list[list[str]]:
@@ -91,12 +85,8 @@ class SearchResult:
 def assemble(theorem: str, plan: Plan) -> str:
     """One Lean file: every lemma with its real proof, then the main theorem."""
     blocks = [f"namespace {NAMESPACE}"]
-    for lem in plan.lemmas:
-        body = "\n".join("  " + line for line in lem.proof.split("\n"))
-        blocks.append(f"theorem {lem.name} {lem.statement} := by\n{body}")
-    main_body = "\n".join("  " + line for line in plan.main_proof.split("\n"))
-    blocks.append(f"theorem main {theorem} := by\n{main_body}")
-    blocks.append(f"end {NAMESPACE}")
+    blocks += [render_theorem(lem.name, lem.statement, lem.proof) for lem in plan.lemmas]
+    blocks += [render_theorem("main", theorem, plan.main_proof), f"end {NAMESPACE}"]
     return "\n\n".join(blocks) + "\n"
 
 

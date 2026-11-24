@@ -1,6 +1,6 @@
 """Working together: a Session is the shared notebook between you and the search.
 
-The search runs in one thread; you (the terminal, or later the web page) act
+The search runs in one thread; you (through the web page) act
 from another. You can change the session at ANY time and the search picks the
 change up at its next checkpoint (before each round, plan and lemma):
 
@@ -9,7 +9,7 @@ change up at its next checkpoint (before each round, plan and lemma):
   reject_lemma("bad_step")              - "this lemma is false / useless": plans using it are dropped
   pin("induction on n")                 - "keep going in this direction"
   pause() / resume()                    - the search waits at its next checkpoint
-  edit_statement(...) / stop()          - end this search (the caller can start a new one)
+  stop()                                - end this search
 
 And the search can ASK you: ask(question) waits until you call answer(...).
 """
@@ -25,8 +25,7 @@ def normalize(statement: str) -> str:
 
 
 class Session:
-    def __init__(self, theorem: str, answer_timeout: float = 600):
-        self.theorem = theorem
+    def __init__(self, answer_timeout: float = 600):
         self.answer_timeout = answer_timeout  # seconds the search waits for your answer
         self.question = None  # the question currently waiting for an answer, if any
         self._hints = []
@@ -63,14 +62,10 @@ class Session:
     def resume(self) -> None:
         self._running.set()
 
-    def stop(self, reason: str = "stopped by the user") -> None:
-        self._stop_reason = reason
+    def stop(self) -> None:
+        self._stop_reason = "stopped by the user"
         self._running.set()  # wake the search if it is paused, so it can notice the stop
         self._answers.put(None)  # and if it is waiting for an answer
-
-    def edit_statement(self, new_statement: str) -> None:
-        self.theorem = new_statement
-        self.stop("the statement was edited")
 
     def answer(self, text: str) -> None:
         self._answers.put(text)
@@ -96,6 +91,10 @@ class Session:
         """Wait while paused. Returns a reason if the search should stop now, else None."""
         self._running.wait()
         return self._stop_reason
+
+    @property
+    def stopped(self) -> bool:
+        return self._stop_reason is not None
 
     def ask(self, question: str) -> str | None:
         """Wait for the user's answer (None after answer_timeout seconds, or if stopped)."""

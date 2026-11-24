@@ -26,6 +26,7 @@ HEADER = "import Mathlib\n\nset_option autoImplicit false\n\nopen BigOperators R
 DEFAULT_HEARTBEATS = 200_000  # Lean's "fuel" per theorem; stops runaway tactics
 DEFAULT_TIMEOUT = 300  # seconds for one check
 ALLOWED_AXIOMS = {"propext", "Classical.choice", "Quot.sound"}
+FORBIDDEN = ("sorry", "admit", "axiom")  # never allowed in a generated proof
 
 REPL_BINARY = ".lake/packages/REPL/.lake/build/bin/repl"  # built by `lake build repl` in lean_env/
 STARTUP_TIMEOUT = 600  # seconds to load Mathlib in a fresh REPL (cold disk cache can be slow)
@@ -47,7 +48,6 @@ class Message:
 class RunOutput:
     messages: list[Message]
     timed_out: bool
-    seconds: float
 
 
 @dataclass
@@ -97,6 +97,10 @@ class FinalResult:
 def indent(text: str, spaces: int = 2) -> str:
     pad = " " * spaces
     return "\n".join(pad + line if line.strip() else line for line in text.strip("\n").split("\n"))
+
+
+def render_theorem(name: str, statement: str, proof: str) -> str:
+    return f"theorem {name} {statement} := by\n{indent(proof)}"
 
 
 class Repl:
@@ -181,21 +185,19 @@ def run_lean(code: str, timeout: int = DEFAULT_TIMEOUT) -> RunOutput:
             repl = _idle.get_nowait()
         except queue.Empty:
             repl = Repl()  # ~30 s: loads Mathlib
-        start = time.time()
         reply = repl.send({"cmd": code[len(HEADER) :], "env": repl.env}, timeout)
-        seconds = time.time() - start
         if reply is None:  # timed out or crashed: this REPL's state is unknown, so replace it
             crashed = repl.proc.poll() is not None
             repl.close()
             if crashed:
-                return RunOutput([Message(0, "error", "Lean crashed")], False, seconds)
-            return RunOutput([], True, seconds)
+                return RunOutput([Message(0, "error", "Lean crashed")], False)
+            return RunOutput([], True)
         repl.checks += 1
         if repl.checks >= MAX_CHECKS_PER_REPL:
             repl.close()
         else:
             _idle.put(repl)
-    return RunOutput(parse_messages(reply, offset), False, seconds)
+    return RunOutput(parse_messages(reply, offset), False)
 
 
 def parse_messages(reply: dict, offset: int = 0) -> list[Message]:

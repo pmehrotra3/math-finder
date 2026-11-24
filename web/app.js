@@ -1,4 +1,4 @@
-// Math Finder web page. Talks to server/app.py: REST for actions, a WebSocket for live events.
+// Math Finder web page. Talks to mathfinder/server.py: REST for actions, a WebSocket for live events.
 
 const $ = (id) => document.getElementById(id);
 
@@ -406,16 +406,4 @@ window.addEventListener("DOMContentLoaded", () => {
   $("stop-btn").onclick = () => send("stop", {}, "stop");
   document.addEventListener("click", () => $("lemma-menu").classList.add("hidden"));
   updatePreview();
-  // Open http://localhost:8765/#demo to see the page with recorded events, no search needed.
-  if (location.hash === "#demo") runDemo();
 });
-
-// ---------- demo: replay a recorded search (used to check the page without Lean or the model) ----------
-
-async function runDemo() {
-  const events = await (await fetch("demo_events.json")).json();
-  Object.assign(state, { sessionId: "demo", startedAt: Date.now() - 95000 });
-  $("step-search").classList.remove("hidden");
-  setStatus("running");
-  events.forEach(handleEvent);
-}

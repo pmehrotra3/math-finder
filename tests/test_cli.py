@@ -1,16 +1,12 @@
-"""Tests for mathfinder/cli.py: approval, explanation, saving, tracing, typed commands. Lean and the model are faked."""
-
-import json
+"""Tests for mathfinder/cli.py and mathfinder/bench.py. Lean and the model are faked."""
 
 import pytest
 
-from mathfinder import cli
-from mathfinder.collab import Session
-from mathfinder.formalize import Formalization
-from mathfinder.llm import LLMError
-from mathfinder.optimize import Optimization
-from mathfinder.planner import Plan
+from mathfinder import bench, cli, pipeline
+from mathfinder.lean import Decl, check_decls
+from mathfinder.planner import Lemma, Plan
 from mathfinder.search import SearchResult
+from mathfinder.translate import Formalization
 
 
 @pytest.fixture
@@ -61,75 +57,85 @@ def test_no_keyboard_means_no(fake_formalize):
     assert cli.approve("latex", ask=no_keyboard) is None
 
 
-def test_main_with_latex_and_yes_runs_the_search_explains_and_saves(fake_formalize, monkeypatch, tmp_path):
+def test_prove_command_passes_its_arguments_on(fake_formalize, monkeypatch, capsys):
     fake_formalize()
-    monkeypatch.setattr(cli, "RUNS_DIR", tmp_path)
-    seen = {}
+    calls = []
 
-    def fake_search(statement, hints, rounds, on_event):
-        seen["statement"] = statement
-        return SearchResult(True, "theorem main ... := by\n  decide\n", Plan("check all cases", [], "decide"))
+    def fake_prove(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"proved": True, "message": "ok", "lean_code": "CODE", "explanation": "WHY", "folder": "runs/x"}
 
-    monkeypatch.setattr(cli, "search", fake_search)
-    monkeypatch.setattr(cli, "explain", lambda theorem, plan, code: "## Theorem\nexplained")
-    latex = r"For every integer $n$, $6 \mid n^3 - n$."
-    assert cli.main(["prove", latex, "--yes", "--no-optimize"]) == 0
-    assert seen["statement"] == "(n : ℤ) : 6 ∣ n ^ 3 - n"
-
-    [run] = tmp_path.iterdir()  # exactly one run folder was created
-    assert (run / "theorem.txt").read_text() == latex + "\n"
-    assert (run / "proof.lean").read_text().startswith("import Mathlib")
-    assert (run / "explanation.md").read_text() == "## Theorem\nexplained\n"
-    trace = [json.loads(line) for line in (run / "trace.jsonl").read_text().splitlines()]
-    assert trace[0]["kind"] == "meta" and trace[-1] == {**trace[-1], "kind": "result", "proved": True}
+    monkeypatch.setattr(cli, "prove", fake_prove)
+    assert cli.main(["prove", "latex", "--yes", "--hint", "use rfl", "--rounds", "1", "--metric", "readable"]) == 0
+    assert cli.main(["prove", "--lean", ": True", "--no-optimize", "--no-explain"]) == 0
+    assert calls[0][0] == ("(n : ℤ) : 6 ∣ n ^ 3 - n", "latex", ["use rfl"], 1)
+    assert (calls[0][1]["metric"], calls[0][1]["explained"]) == ("readable", True)
+    assert calls[1][0][0] == ": True" and (calls[1][1]["metric"], calls[1][1]["explained"]) == (None, False)
+    out = capsys.readouterr().out
+    assert "Result: PROVED (ok)" in out and "CODE" in out and "WHY" in out
 
 
-def test_a_failed_explanation_still_saves_the_proof(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(cli, "RUNS_DIR", tmp_path)
-    monkeypatch.setattr(cli, "search", lambda *a, **k: SearchResult(True, "code\n", Plan("p", [], "simp")))
-
-    def broken_explain(theorem, plan, code):
-        raise LLMError("model unavailable")
-
-    monkeypatch.setattr(cli, "explain", broken_explain)
-    assert cli.main(["prove", "--lean", "(n : ℕ) : n = n", "--no-optimize"]) == 0
-    assert "could not write an explanation" in capsys.readouterr().out
-    assert len(list(tmp_path.iterdir())) == 1
+def test_sub_search_events_are_indented(capsys):
+    cli.print_event({"kind": "subsearch_start", "depth": 0, "name": "hard", "statement": ": P"})
+    cli.print_event(
+        {"kind": "lemma_proved", "depth": 1, "name": "step", "statement": ": Q", "feedback": "hammer: simp"}
+    )
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "      ↳ hard is stuck: starting a sub-search on it"
+    assert out[1] == "        ✓ step : : Q   [hammer: simp]"
 
 
-def test_typed_commands_change_the_session():
-    s = Session("t")
-    assert cli.handle_command(s, "hint try induction on n\n") == "hint added: try induction on n"
-    assert cli.handle_command(s, "lemma key (a : ℝ) : 0 ≤ a ^ 2").startswith("lemma suggested: key")
-    assert cli.handle_command(s, "reject bad_step") == "rejected: bad_step"
-    assert cli.handle_command(s, "pause").startswith("paused")
-    assert cli.handle_command(s, "resume") == "resumed"
-    assert "theorem key (a : ℝ) : 0 ≤ a ^ 2" in s.hints()[1]
-    assert cli.handle_command(s, "dance").startswith("unknown command")
+# ---------- benchmark ----------
 
 
-def test_while_a_question_is_open_any_line_is_the_answer():
-    s = Session("t")
-    s.question = "Any idea?"
-    assert cli.handle_command(s, "hint this whole line is an answer") == "answer sent"
-    assert s.ask("Any idea?") == "hint this whole line is an answer"
+def test_the_benchmark_has_20_problems_with_unique_names():
+    problems = bench.load_problems()
+    assert len(problems) == 20
+    assert len({p["name"] for p in problems}) == 20
+    assert all(p["topic"] and p["statement"] for p in problems)
 
 
-def test_a_better_proof_from_the_optimizer_is_the_one_saved_and_explained(monkeypatch, tmp_path):
-    monkeypatch.setattr(cli, "RUNS_DIR", tmp_path)
-    monkeypatch.setattr(cli, "search", lambda *a, **k: SearchResult(True, "LONG PROOF\n", Plan("long", [], "x")))
-    short_plan = Plan("short", [], "simp")
-    seen = {}
+def test_results_table_summarizes_by_topic():
+    rows = [
+        {"name": "a", "topic": "algebra", "proved": True, "seconds": 30, "how": "Automation: linarith"},
+        {"name": "b", "topic": "algebra", "proved": False, "seconds": 90, "how": "no verified proof"},
+        {"name": "c", "topic": "induction", "proved": True, "seconds": 60, "how": "plan with 1 lemma(s), round 1"},
+    ]
+    table = bench.results_table(rows)
+    assert table.startswith("**2/3 proved** (67%), total time 3 min")
+    assert "| 2 | `b` | algebra | ✗ not proved | 90 s | no verified proof |" in table
+    assert table.endswith("By topic: algebra 1/2, induction 1/1")
 
-    def fake_optimize(statement, code, plan, metric, on_event):
-        seen["metric"] = metric
-        stats = {"steps": 1, "lemmas": 0, "heavy": 0, "cost": 1}
-        return Optimization("SHORT PROOF\n", short_plan, metric, {**stats, "cost": 9}, stats, 3, True)
 
-    monkeypatch.setattr(cli, "optimize", fake_optimize)
-    monkeypatch.setattr(cli, "explain", lambda theorem, plan, code: f"explained {plan.sketch}: {code.strip()}")
-    assert cli.main(["prove", "--lean", "(n : ℕ) : n = n", "--metric", "readable"]) == 0
-    [run] = tmp_path.iterdir()
-    assert seen["metric"] == "readable"
-    assert (run / "proof.lean").read_text().endswith("SHORT PROOF\n")
-    assert (run / "explanation.md").read_text() == "explained short: SHORT PROOF\n"
+def test_run_bench_survives_a_crash_and_saves_a_table(monkeypatch):
+    def fake_search(statement, rounds, on_event):
+        on_event({"kind": "attempt", "ok": True})
+        if "crash" in statement:
+            raise RuntimeError("boom")
+        return SearchResult(True, "code", Plan("p", [Lemma("k", ": True", "")], "exact k"), 1, "verified")
+
+    monkeypatch.setattr(bench, "RUNS_DIR", pipeline.RUNS_DIR)
+    monkeypatch.setattr(bench, "search", fake_search)
+    problems = [
+        {"name": "good", "topic": "t", "statement": ": True"},
+        {"name": "bad", "topic": "t", "statement": ": crash"},
+    ]
+    path = bench.run_bench(problems)
+    table = path.read_text()
+    assert "**1/2 proved**" in table and "plan with 1 lemma(s), round 1" in table and "crash: boom" in table
+    assert len(list(path.parent.glob("*/trace.jsonl"))) == 2
+
+
+def test_bench_command_can_run_only_some_problems(monkeypatch, tmp_path):
+    seen = []
+    (tmp_path / "results.md").write_text("TABLE")
+    monkeypatch.setattr(cli, "run_bench", lambda problems, rounds: seen.extend(problems) or tmp_path / "results.md")
+    assert cli.main(["bench", "--only", "gcd_180_168", "two_pow_ge"]) == 0
+    assert [p["name"] for p in seen] == ["gcd_180_168", "two_pow_ge"]
+
+
+@pytest.mark.lean
+def test_every_benchmark_statement_typechecks():
+    problems = bench.load_problems()
+    results = check_decls([Decl(p["name"], p["statement"], "sorry") for p in problems])
+    assert {p["name"]: results[p["name"]].errors for p in problems} == {p["name"]: [] for p in problems}

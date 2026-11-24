@@ -19,8 +19,7 @@ from mathfinder import llm
 from mathfinder.lean import Decl, check_decls, verify_final
 from mathfinder.planner import Plan
 from mathfinder.prover import parse_proofs
-from mathfinder.search import NAMESPACE, assemble
-from mathfinder.traces import OnEvent
+from mathfinder.search import NAMESPACE, OnEvent, assemble
 
 CANDIDATES = 4
 HEAVY = ("nlinarith", "polyrith", "aesop", "simp_all", "decide", "exact?")

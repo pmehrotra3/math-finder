@@ -1,10 +1,7 @@
 """Tests for mathfinder/optimize.py."""
 
-import json
-
 import pytest
 
-from mathfinder import llm
 from mathfinder import optimize as opt
 from mathfinder.planner import Lemma, Plan
 from mathfinder.search import assemble
@@ -39,18 +36,15 @@ def test_prompt_names_the_goal_of_the_metric():
     assert "READABLE" in opt.build_prompt(AMGM, LONG_CODE, "readable")
 
 
-def test_no_candidates_keeps_the_original(monkeypatch):
-    monkeypatch.setitem(llm.BACKENDS, "fake", lambda s, p: '```json\n{"proofs": []}\n```')
-    monkeypatch.setenv("MATHFINDER_LLM", "fake")
+def test_no_candidates_keeps_the_original(fake_llm):
+    fake_llm({"proofs": []})
     result = opt.optimize(AMGM, LONG_CODE, LONG_PLAN)
     assert not result.improved and result.lean_code == LONG_CODE
 
 
 @pytest.mark.lean
-def test_a_shorter_verified_proof_replaces_the_original(monkeypatch):
-    answers = {"proofs": ["linarith", "nlinarith [sq_nonneg (a - b)]"]}  # the first one is wrong
-    monkeypatch.setitem(llm.BACKENDS, "fake", lambda s, p: "```json\n" + json.dumps(answers) + "\n```")
-    monkeypatch.setenv("MATHFINDER_LLM", "fake")
+def test_a_shorter_verified_proof_replaces_the_original(fake_llm):
+    fake_llm({"proofs": ["linarith", "nlinarith [sq_nonneg (a - b)]"]})  # the first one is wrong
     events = []
     result = opt.optimize(AMGM, LONG_CODE, LONG_PLAN, on_event=events.append)
 

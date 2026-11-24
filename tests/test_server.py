@@ -1,38 +1,43 @@
-"""Tests for server/app.py. The search, explainer and formalizer are faked, so no Lean or model is needed."""
+"""Tests for mathfinder/pipeline.py and mathfinder/server.py. Lean and the model are faked."""
+
+import json
 
 import pytest
 from fastapi.testclient import TestClient
 
-import server.app as srv
-from mathfinder import cli
-from mathfinder.formalize import Formalization
+from mathfinder import pipeline, server
+from mathfinder.llm import LLMError
 from mathfinder.optimize import Optimization
 from mathfinder.planner import Plan
 from mathfinder.search import SearchResult
+from mathfinder.translate import Formalization
 
 
-def fake_optimize_that_keeps(statement, code, plan, metric, on_event):
-    stats = {"steps": 1, "lemmas": 0, "heavy": 0, "cost": 1}
-    return Optimization(code, plan, metric, stats, stats, 0, False)
+def fake_search(statement, hints, rounds, on_event, session):
+    on_event({"kind": "start", "depth": 0, "theorem": statement})
+    on_event({"kind": "done", "depth": 0, "lean_code": "LONG", "plan": "long"})
+    return SearchResult(True, "LONG", Plan("long", [], "simp"), 1, "verified")
+
+
+def fake_optimize(statement, code, plan, metric, on_event):
+    before, after = {"cost": 7}, {"cost": 1}
+    return Optimization("SHORT", Plan(f"optimized for {metric}", [], "simp"), metric, before, after, 4, True)
 
 
 @pytest.fixture
-def client(monkeypatch, tmp_path):
-    monkeypatch.setattr(cli, "RUNS_DIR", tmp_path)  # run folders go to a temporary place
-    monkeypatch.setattr(srv.explainer, "explain", lambda theorem, plan, code: "## Proof\nby simp")
-    monkeypatch.setattr(srv.optimizer, "optimize", fake_optimize_that_keeps)
-    srv.RUNS.clear()
-    return TestClient(srv.app)
+def client(monkeypatch):
+    monkeypatch.setattr(pipeline, "search", fake_search)
+    monkeypatch.setattr(pipeline, "optimize", fake_optimize)
+    monkeypatch.setattr(pipeline, "explain", lambda theorem, plan, code: f"explained {plan.sketch}: {code}")
+    server.RUNS.clear()
+    return TestClient(server.app)
 
 
-def fake_search_that_proves(statement, rounds, on_event, session):
-    on_event({"kind": "start", "depth": 0, "theorem": statement})
-    on_event({"kind": "lemma_proved", "depth": 0, "name": "key", "statement": ": True", "feedback": "hammer"})
-    on_event({"kind": "done", "depth": 0, "lean_code": "theorem main ...", "plan": "simp it"})
-    return SearchResult(True, "theorem main ...", Plan("simp it", [], "simp"), 1, "verified")
+def start(client, **body):
+    return client.post("/api/sessions", json={"statement": "t", **body})
 
 
-def watch_until_finished(client, run_id):
+def watch(client, run_id):
     with client.websocket_connect(f"/ws/{run_id}") as ws:
         events = []
         while not events or events[-1]["kind"] != "finished":
@@ -40,85 +45,93 @@ def watch_until_finished(client, run_id):
     return events
 
 
+# ---------- pipeline ----------
+
+
+def test_the_better_proof_is_saved_explained_and_traced(client):
+    outcome = pipeline.prove(": True", r"$1 = 1$", metric="readable")
+    assert outcome["lean_code"] == "SHORT" and outcome["plan"] == "optimized for readable"
+    assert outcome["optimization"] == {"metric": "readable", "before": {"cost": 7}, "after": {"cost": 1}}
+    [run] = pipeline.RUNS_DIR.iterdir()
+    assert outcome["folder"] == f"runs/{run.name}"
+    assert (run / "theorem.txt").read_text() == "$1 = 1$\n"
+    proof = (run / "proof.lean").read_text()
+    assert proof.startswith("import Mathlib") and proof.endswith("SHORT")
+    assert (run / "explanation.md").read_text() == "explained optimized for readable: SHORT\n"
+    trace = [json.loads(line) for line in (run / "trace.jsonl").read_text().splitlines()]
+    assert [e["kind"] for e in trace] == ["meta", "start", "done", "result", "explaining"]
+
+
+def test_first_proof_can_be_kept_and_a_failed_explanation_still_saves_it(client, monkeypatch):
+    def broken(theorem, plan, code):
+        raise LLMError("model unavailable")
+
+    monkeypatch.setattr(pipeline, "explain", broken)
+    outcome = pipeline.prove(": True", metric=None)
+    assert outcome["lean_code"] == "LONG" and outcome["optimization"] is None
+    assert "could not write an explanation" in outcome["explanation"]
+    assert len(list(pipeline.RUNS_DIR.glob("*/proof.lean"))) == 1
+
+
+def test_run_folders_never_collide():
+    assert len({pipeline.new_run_dir() for _ in range(3)}) == 3
+
+
+# ---------- server ----------
+
+
 def test_formalize_endpoint(client, monkeypatch):
     f = Formalization("x", "(n : ℕ) : n = n", "For all n, n = n.", True, "same")
-    monkeypatch.setattr(srv.formalizer, "formalize", lambda latex: f)
+    monkeypatch.setattr(server.translate, "formalize", lambda latex: f)
     data = client.post("/api/formalize", json={"latex": "$n = n$"}).json()
     assert data["statement"] == "(n : ℕ) : n = n" and data["ok"] and data["faithful"]
 
 
-def test_a_search_streams_its_events_and_ends_with_the_result(client, monkeypatch):
-    monkeypatch.setattr(srv.engine, "search", fake_search_that_proves)
-    run_id = client.post("/api/sessions", json={"statement": "(n : ℕ) : n = n"}).json()["id"]
-
-    events = watch_until_finished(client, run_id)
-    kinds = [e["kind"] for e in events]
-    assert kinds == ["start", "lemma_proved", "done", "explaining", "finished"]
-    assert events[-1]["result"]["optimization"]["metric"] == "short"
-    result = events[-1]["result"]
-    assert result["proved"] and result["explanation"] == "## Proof\nby simp"
-
-    status = client.get(f"/api/sessions/{run_id}").json()
-    assert status["status"] == "proved"
-    assert (cli.RUNS_DIR / status["result"]["folder"].split("/")[-1] / "proof.lean").exists()
+def test_a_search_streams_its_events_and_ends_with_the_result(client):
+    run_id = start(client).json()["id"]
+    events = watch(client, run_id)
+    assert [e["kind"] for e in events] == ["start", "done", "explaining", "finished"]
+    assert events[-1]["status"] == "proved" and events[-1]["result"]["lean_code"] == "SHORT"
+    assert watch(client, run_id) == events  # a late visitor gets the full history
 
 
-def test_commands_reach_the_session_while_it_waits_for_an_answer(client, monkeypatch):
-    def fake_search_that_asks(statement, rounds, on_event, session):
-        on_event({"kind": "ask_user", "depth": 0, "question": "Any idea?"})
-        answer = session.ask("Any idea?")
-        on_event({"kind": "user_answer", "depth": 0, "text": answer})
+def test_actions_reach_the_session_while_it_waits_for_an_answer(client, monkeypatch):
+    def search_that_asks(statement, hints, rounds, on_event, session):
+        on_event({"kind": "ask_user", "question": "Any idea?"})
+        on_event({"kind": "user_answer", "text": session.ask("Any idea?")})
         return SearchResult(False, message=f"hints were {session.hints()}")
 
-    monkeypatch.setattr(srv.engine, "search", fake_search_that_asks)
-    run_id = client.post("/api/sessions", json={"statement": "t", "hints": ["start hint"]}).json()["id"]
+    monkeypatch.setattr(pipeline, "search", search_that_asks)
+    run_id = start(client, hints=["start hint"]).json()["id"]
     assert client.post(f"/api/sessions/{run_id}/hint", json={"text": "try cases"}).json() == {"ok": True}
     with client.websocket_connect(f"/ws/{run_id}") as ws:
         assert ws.receive_json()["kind"] == "ask_user"
-        assert client.get(f"/api/sessions/{run_id}").json()["question"] == "Any idea?"
         client.post(f"/api/sessions/{run_id}/answer", json={"text": "use induction"})
-        assert ws.receive_json() == {"kind": "user_answer", "depth": 0, "text": "use induction"}
+        assert ws.receive_json()["text"] == "use induction"
         final = ws.receive_json()
-    assert final["kind"] == "finished" and final["status"] == "not_proved"
+    assert final["status"] == "not_proved"
     assert final["result"]["message"] == "hints were ['start hint', 'try cases']"
 
 
-def test_edit_checks_the_statement_then_starts_a_new_search(client, monkeypatch):
-    monkeypatch.setattr(srv.engine, "search", fake_search_that_proves)
-    monkeypatch.setattr(srv, "statement_errors", lambda s: ["bad"] if "oops" in s else [])
-    run_id = client.post("/api/sessions", json={"statement": "t"}).json()["id"]
-    assert client.post(f"/api/sessions/{run_id}/edit", json={"statement": "oops"}).status_code == 400
-    new_id = client.post(f"/api/sessions/{run_id}/edit", json={"statement": "(n : ℕ) : n = n"}).json()["new_id"]
-    assert new_id != run_id
-    assert watch_until_finished(client, new_id)[-1]["status"] == "proved"
+def test_stopped_and_crashed_searches_still_finish(client, monkeypatch):
+    def stopped(statement, hints, rounds, on_event, session):
+        session.stop()
+        return SearchResult(False, message="stopped")
+
+    monkeypatch.setattr(pipeline, "search", stopped)
+    assert watch(client, start(client).json()["id"])[-1]["status"] == "stopped"
+    monkeypatch.setattr(pipeline, "search", lambda *a, **k: 1 / 0)
+    final = watch(client, start(client).json()["id"])[-1]
+    assert final["status"] == "not_proved" and "internal error" in final["result"]["message"]
 
 
-def test_unknown_session_and_unknown_action(client, monkeypatch):
-    monkeypatch.setattr(srv.engine, "search", fake_search_that_proves)
-    assert client.get("/api/sessions/nope").status_code == 404
-    run_id = client.post("/api/sessions", json={"statement": "t"}).json()["id"]
+def test_bad_requests_are_rejected(client):
+    assert start(client, metric="fastest").status_code == 400
+    assert client.post("/api/sessions/nope/hint", json={}).status_code == 404
+    run_id = start(client).json()["id"]
     assert client.post(f"/api/sessions/{run_id}/dance", json={}).status_code == 400
 
 
 def test_the_web_page_is_served(client):
-    page = client.get("/")
-    assert page.status_code == 200 and "<title>Math Finder</title>" in page.text
+    assert "<title>Math Finder</title>" in client.get("/").text
     assert client.get("/app.js").status_code == 200
-    assert client.get("/api/sessions/nope").status_code == 404  # the API still wins over the static files
-
-
-def test_the_chosen_metric_reaches_the_optimizer_and_a_better_proof_wins(client, monkeypatch):
-    monkeypatch.setattr(srv.engine, "search", fake_search_that_proves)
-
-    def fake_better(statement, code, plan, metric, on_event):
-        on_event({"kind": "optimized", "depth": 0, "improved": True})
-        before = {"steps": 5, "lemmas": 2, "heavy": 0, "cost": 7}
-        after = {"steps": 1, "lemmas": 0, "heavy": 0, "cost": 1}
-        return Optimization("SHORTER", Plan(f"optimized for {metric}", [], "simp"), metric, before, after, 4, True)
-
-    monkeypatch.setattr(srv.optimizer, "optimize", fake_better)
-    assert client.post("/api/sessions", json={"statement": "t", "metric": "fastest"}).status_code == 400
-    run_id = client.post("/api/sessions", json={"statement": "t", "metric": "readable"}).json()["id"]
-    result = watch_until_finished(client, run_id)[-1]["result"]
-    assert result["lean_code"] == "SHORTER" and result["plan"] == "optimized for readable"
-    assert result["optimization"]["before"]["cost"] == 7 and result["optimization"]["after"]["cost"] == 1

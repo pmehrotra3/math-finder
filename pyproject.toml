@@ -1,13 +1,20 @@
 [project]
 name = "mathfinder"
 version = "0.1.0"
-description = "Collaborative AI theorem prover: LaTeX in, verified Lean proof out."
+description = "An automated reasoning system: LaTeX in, machine-checked Lean 4 proof out."
+readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "anthropic>=0.121",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
 ]
+
+[project.scripts]
+mathfinder = "mathfinder.cli:main"
+
+[project.urls]
+Repository = "https://github.com/pmehrotra3/math-finder"
 
 [dependency-groups]
 dev = [
@@ -25,16 +32,14 @@ packages = ["mathfinder"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]  # so tests can `import server.app` from the project root
 markers = [
     "llm: calls a real LLM (slow, uses quota). Run with: pytest -m llm",
-    "lean: runs Lean (first one waits for a REPL to load Mathlib). Skip with: pytest -m 'not lean and not llm'",
+    "lean: runs Lean. Skip with: pytest -m 'not lean and not llm'",
 ]
 addopts = "-m 'not llm'"
 
 [tool.ruff]
 line-length = 120
-extend-exclude = ["lean_env"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]

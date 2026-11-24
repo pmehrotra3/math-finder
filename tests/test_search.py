@@ -1,20 +1,13 @@
-"""Tests for mathfinder/search.py and mathfinder/cli.py."""
-
-import json
+"""Tests for mathfinder/search.py."""
 
 import pytest
 
-from mathfinder import cli, llm, planner, prover
+from mathfinder import planner, prover
 from mathfinder.planner import Lemma, Plan
-from mathfinder.search import SearchResult, assemble, score, search, splice
+from mathfinder.search import assemble, score, search, splice
 
 ODD_SUM = "(n : ℕ) : ∑ i ∈ Finset.range n, (2 * i + 1) = n ^ 2"
 INDUCTION = "induction n with\n| zero => simp\n| succ k ih =>\n  rw [Finset.sum_range_succ, ih]\n  ring"
-
-
-@pytest.fixture(autouse=True)
-def temp_cache(tmp_path, monkeypatch):
-    monkeypatch.setattr(prover, "CACHE_FILE", tmp_path / "lemmas.json")
 
 
 # ---------- fast tests ----------
@@ -51,44 +44,12 @@ def test_splice_inserts_renamed_sub_lemmas_before_the_stuck_lemma():
     assert stuck.status == "proved" and stuck.proof == "exact hard_step n"
 
 
-def test_cli_passes_arguments_to_search(monkeypatch, capsys, tmp_path):
-    monkeypatch.setattr(cli, "RUNS_DIR", tmp_path)  # don't write into the real runs/ folder
-    seen = {}
-
-    def fake_search(theorem, hints, rounds, on_event):
-        seen.update(theorem=theorem, hints=hints, rounds=rounds)
-        on_event({"kind": "start", "theorem": theorem})
-        return SearchResult(True, message="verified")
-
-    monkeypatch.setattr(cli, "search", fake_search)
-    code = cli.main(
-        ["prove", "--lean", "(n : ℕ) : n = n", "--hint", "use rfl", "--rounds", "1", "--no-explain", "--no-optimize"]
-    )
-    assert code == 0
-    assert seen == {"theorem": "(n : ℕ) : n = n", "hints": ["use rfl"], "rounds": 1}
-    assert "Result: PROVED" in capsys.readouterr().out
-
-
-def test_cli_indents_sub_search_events(capsys):
-    cli.print_event({"kind": "subsearch_start", "depth": 0, "name": "hard", "statement": ": P"})
-    cli.print_event(
-        {"kind": "lemma_proved", "depth": 1, "name": "step", "statement": ": Q", "feedback": "hammer: simp"}
-    )
-    out = capsys.readouterr().out.splitlines()
-    assert out[0] == "      ↳ hard is stuck: starting a sub-search on it"
-    assert out[1] == "        ✓ step : : Q   [hammer: simp]"
-
-
 # ---------- Lean tests ----------
 
 
 @pytest.mark.lean
-def test_false_theorem_is_refuted_before_any_planning(monkeypatch):
-    def no_model(system, prompt):
-        raise AssertionError("the model should not be called for a false statement")
-
-    monkeypatch.setitem(llm.BACKENDS, "fake", no_model)
-    monkeypatch.setenv("MATHFINDER_LLM", "fake")
+def test_false_theorem_is_refuted_before_any_planning(fake_llm):
+    fake_llm()  # no replies: any model call fails the test
     events = []
     result = search("(n : ℕ) : n ^ 2 ≤ 2 * n + 3", on_event=events.append)
     assert not result.proved
@@ -97,7 +58,7 @@ def test_false_theorem_is_refuted_before_any_planning(monkeypatch):
 
 
 @pytest.mark.lean
-def test_full_search_with_scripted_model(monkeypatch):
+def test_full_search_with_scripted_model(fake_llm):
     """Plan → skeleton check → hammer proves one lemma, 'the model' proves the other → final check."""
     theorem = "(n : ℕ) : (∑ i ∈ Finset.range n, (2 * i + 1) = n ^ 2) ∧ n ≤ n ^ 2"
     plan_json = {
@@ -115,11 +76,10 @@ def test_full_search_with_scripted_model(monkeypatch):
 
     def scripted(system, prompt):
         if system == planner.SYSTEM:
-            return "```json\n" + json.dumps(plan_json) + "\n```"
-        return "```json\n" + json.dumps({"proofs": [INDUCTION]}) + "\n```"
+            return plan_json
+        return {"proofs": [INDUCTION]}
 
-    monkeypatch.setitem(llm.BACKENDS, "fake", scripted)
-    monkeypatch.setenv("MATHFINDER_LLM", "fake")
+    fake_llm(scripted)
     events = []
     result = search(theorem, rounds=1, on_event=events.append)
 
@@ -131,7 +91,7 @@ def test_full_search_with_scripted_model(monkeypatch):
 
 
 @pytest.mark.lean
-def test_stuck_lemma_is_proved_by_a_sub_search(monkeypatch):
+def test_stuck_lemma_is_proved_by_a_sub_search(fake_llm, monkeypatch):
     """The 'model' can't prove odd_sum directly, so a sub-search splits it into a smaller step."""
     theorem = "(n : ℕ) : (∑ i ∈ Finset.range n, (2 * i + 1) = n ^ 2) ∧ n ≤ n ^ 2"
     top_plan = {
@@ -162,12 +122,10 @@ def test_stuck_lemma_is_proved_by_a_sub_search(monkeypatch):
 
     def scripted(system, prompt):
         if system == planner.SYSTEM:
-            chosen = top_plan if "∧" in prompt else sub_plan
-            return "```json\n" + json.dumps(chosen) + "\n```"
-        return "```json\n" + json.dumps({"proofs": ["simp"]}) + "\n```"  # the prover always fails
+            return top_plan if "∧" in prompt else sub_plan
+        return {"proofs": ["simp"]}  # the prover always fails
 
-    monkeypatch.setitem(llm.BACKENDS, "fake", scripted)
-    monkeypatch.setenv("MATHFINDER_LLM", "fake")
+    fake_llm(scripted)
     monkeypatch.setattr(prover, "REPAIR_ROUNDS", 0)  # fail fast: one LLM round per lemma
     events = []
     result = search(theorem, rounds=1, on_event=events.append)
