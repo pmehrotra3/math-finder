@@ -33,7 +33,7 @@ The original 18-iteration prototype log (M0–M13) is in git: `git show v0-proto
 - `traces.py` is now just the event logger (training-data `export` + the `export` CLI command removed).
 - `critic.py` folded into `search.py` (its only user). PROGRESS.md → this file, trimmed (full log: `git show v0-prototype:PROGRESS.md`).
 - Added ruff (line 120; E,F,W,I,B,UP), fixed all findings (`l` → `lem`, `raise ... from`, `zip(strict=True)`,
-  late-binding lambda in prover), formatted everything. Type hints on all public functions (`OnEvent` alias in traces.py).
+  lambda default arg in prover; lint only, no behavior change), formatted everything. Type hints on all public functions (`OnEvent` alias in traces.py).
 - `.env.example` documents MATHFINDER_LLM, MATHFINDER_CLI_MODEL, ANTHROPIC_API_KEY.
 - Verified: `uv run ruff check .` → `All checks passed!`; `uv run pytest -q -m "not lean and not llm"` → `77 passed, 31 deselected in 0.86s`;
   `uv run pytest -q -m "lean and not llm" tests/test_planner.py tests/test_search.py tests/test_traces.py tests/test_cli.py`
@@ -49,8 +49,10 @@ The original 18-iteration prototype log (M0–M13) is in git: `git show v0-proto
   `check_decls`/`verify_final` are unchanged. Timeout or crash → that REPL is killed and replaced. Recycled after
   `MATHFINDER_LEAN_RECYCLE` (300) checks; pool size `MATHFINDER_LEAN_WORKERS` (2).
 - REPL format quirks: severity "info" (→ "information"); sorry has no `kind`, detected from "declaration uses `sorry`".
-- Measured (warm disk cache): old `lake env lean` per check 2.6–3.0 s; REPL startup 2.3 s warm (32 s right after the
-  Mathlib cache refresh); 5-candidate batch median 20 ms, p95 27 ms; RSS 7.46 GB → 7.71 GB after 300 checks (~0.8 MB/check).
+- Measured on the same 5-candidate file, nothing else running: `lake env lean` median 2.78 s (6 runs); warm REPL median
+  74 ms (20 runs, 70–114 ms), about 38x faster. REPL startup 2.3–2.7 s warm (32 s right after the Mathlib cache refresh).
+  RSS 7.46 GB → 7.71 GB after 300 small checks (~0.8 MB/check); sharing between two workers was not measured.
+  (Corrected 2026-11-24: the step 2 commit message's "~20 ms instead of ~3 s" compared different inputs.)
 - Tests: new parse/header/isolation/timeout-recovery tests. `uv run pytest -q -m "not lean and not llm"` → `79 passed, 32 deselected in 0.91s`;
   `uv run pytest -q -m "not llm"` → `105 passed, 6 deselected in 35.45s` (prototype: 112 passed in 1040.56s).
 - Next: step 3 (safe to host).

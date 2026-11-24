@@ -67,7 +67,7 @@
    "explanation": "## Theorem\nFor every natural number $n$,\n$$n^2 + n \\text{ is even.}$$\n\n## Idea\nFactor $n^2 + n = n(n+1)$. This is a product of two consecutive natural numbers. One of them is even, so the product is even.\n\n## Proof\n**Step 1** (`sq_add_self_eq_mul_succ`). For every $n \\in \\mathbb{N}$,\n$$n^2 + n = n(n+1).$$\nThis holds because expanding the right side gives $n(n+1) = n \\cdot n + n = n^2 + n$.\n\nThe planner's note says this step is proved by `ring`, but the verified Lean proof actually uses `linarith`. That works because `linarith` normalizes both sides as polynomial expressions before comparing them. After normalization the two sides are the same expression, so the identity holds with nothing left to prove.\n\n**Conclusion** (`main`). By Step 1, it suffices to show that $n(n+1)$ is even. The proof rewrites the goal $\\text{Even}(n^2+n)$ into $\\text{Even}(n(n+1))$ and then applies Mathlib's lemma `Nat.even_mul_succ_self`. That lemma states that $n(n+1)$ is even for every natural number $n$.\n\nThe reason it holds is that $n$ and $n+1$ are consecutive, so exactly one of them is even. A product with an even factor is even. Hence $n^2 + n$ is even. $\\blacksquare$",
    "plan": "Rewrite n^2 + n as n * (n + 1) by ring, then apply Mathlib's Nat.even_mul_succ_self, which says n * (n + 1) is even.",
    "rounds": 1,
-   "folder": "/Users/pranavmehrotra/Desktop/math_proofs/runs/20261114-154643"
+   "folder": "runs/20261114-154643"
   }
  }
 ]
