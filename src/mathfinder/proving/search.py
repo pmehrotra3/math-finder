@@ -14,7 +14,7 @@ A lemma the prover gets stuck on becomes a smaller search of its own (a
 "sub-search", at most MAX_DEPTH levels deep). If the sub-search proves it, its
 helper lemmas are spliced into the parent plan.
 
-With a collab.Session, you work together: your hints, lemmas and rejections are
+With a session.Session, you work together: your hints, lemmas and rejections are
 read every round, pause/stop are honoured at checkpoints, and before giving up
 the search ASKS you a specific question (your answer buys another round).
 
@@ -28,12 +28,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mathfinder.lean import FORBIDDEN, Decl, check_decls, render_theorem, verify_final
-from mathfinder.planner import Lemma, Plan, propose_plans
-from mathfinder.prover import hammer, prove_lemma
+from mathfinder.lean.checker import FORBIDDEN, Decl, check_decls, render_theorem, verify_final
+from mathfinder.proving.hammer import hammer
+from mathfinder.proving.planner import Lemma, Plan, propose_plans
+from mathfinder.proving.prover import prove_lemma
 
 if TYPE_CHECKING:
-    from mathfinder.collab import Session
+    from mathfinder.proving.session import Session
 
 OnEvent = Callable[[dict], None]  # receives every search event
 Emit = Callable[..., None]  # emit(kind, **fields)
@@ -197,7 +198,7 @@ def search(
 ) -> SearchResult:
     """Search for a verified proof of `theorem` (a Lean statement without a name).
     `depth` is 0 for the user's theorem, 1 for a sub-search on a stuck lemma, ...
-    `session` (optional) is a collab.Session shared with the user."""
+    `session` (optional) is a session.Session shared with the user."""
 
     def emit(kind: str, **data) -> None:
         if on_event:

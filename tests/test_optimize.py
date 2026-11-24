@@ -1,10 +1,10 @@
-"""Tests for mathfinder/optimize.py."""
+"""Tests for proving/optimize.py."""
 
 import pytest
 
-from mathfinder import optimize as opt
-from mathfinder.planner import Lemma, Plan
-from mathfinder.search import assemble
+from mathfinder.proving import optimize as opt
+from mathfinder.proving.planner import Lemma, Plan
+from mathfinder.proving.search import assemble
 
 AMGM = "(a b : ℝ) : a ^ 2 + b ^ 2 ≥ 2 * a * b"
 LONG_PLAN = Plan(

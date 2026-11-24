@@ -1,9 +1,10 @@
-"""Tests for mathfinder/translate.py."""
+"""Tests for mathfinder/translation/."""
 
 import pytest
 
-from mathfinder import translate as tr
-from mathfinder.planner import Lemma, Plan
+from mathfinder.proving.planner import Lemma, Plan
+from mathfinder.translation import explain as ex
+from mathfinder.translation import formalize as fm
 
 # ---------- fast tests ----------
 
@@ -19,7 +20,7 @@ from mathfinder.planner import Lemma, Plan
     ],
 )
 def test_clean_statement(answer, expected):
-    assert tr.clean_statement(answer) == expected
+    assert fm.clean_statement(answer) == expected
 
 
 # ---------- Lean test, scripted model ----------
@@ -32,18 +33,18 @@ def test_formalize_repairs_a_broken_statement_then_judges_it(fake_llm):
 
     def scripted(system, prompt):
         seen.append(system)
-        if system == tr.SYSTEM_FORMALIZE:
+        if system == fm.SYSTEM_FORMALIZE:
             return {"statement": statements.pop(0)}
-        if system == tr.SYSTEM_BACK:
+        if system == fm.SYSTEM_BACK:
             assert "sum of the first" not in prompt  # the back-translator never sees the original
             return {"latex": r"For all $n$, $\sum_{i<n} (2i+1) = n^2$."}
         return {"same_meaning": True, "reason": "identical"}
 
     fake_llm(scripted)
-    result = tr.formalize(r"The sum of the first $n$ odd numbers is $n^2$.")
+    result = fm.formalize(r"The sum of the first $n$ odd numbers is $n^2$.")
     assert result.ok and result.faithful
     assert result.statement.endswith("= n ^ 2")
-    assert seen == [tr.SYSTEM_FORMALIZE, tr.SYSTEM_FORMALIZE, tr.SYSTEM_BACK, tr.SYSTEM_JUDGE]
+    assert seen == [fm.SYSTEM_FORMALIZE, fm.SYSTEM_FORMALIZE, fm.SYSTEM_BACK, fm.SYSTEM_JUDGE]
 
 
 # ---------- real model ----------
@@ -51,7 +52,7 @@ def test_formalize_repairs_a_broken_statement_then_judges_it(fake_llm):
 
 @pytest.mark.llm
 def test_real_formalization_of_a_simple_theorem():
-    result = tr.formalize(r"For every integer $n$, $6 \mid n^3 - n$.")
+    result = fm.formalize(r"For every integer $n$, $6 \mid n^3 - n$.")
     assert result.ok, result.errors
     assert "ℤ" in result.statement or "Int" in result.statement
     assert result.faithful, result.judgment
@@ -59,7 +60,7 @@ def test_real_formalization_of_a_simple_theorem():
 
 @pytest.mark.llm
 def test_real_judge_catches_natural_number_truncation():
-    same, reason = tr.judge(
+    same, reason = fm.judge(
         r"For every integer $n$, $(n - 3)^2 \ge 0$.",
         r"For every natural number $n \in \mathbb{N}$, $(n - 3)^2 \ge 0$, where subtraction is truncated at 0.",
     )
@@ -93,25 +94,25 @@ THEOREM = r"For all positive reals $a, b$: $\frac{a}{b} + \frac{b}{a} \ge 2$."
 
 
 def test_prompt_contains_the_lean_proof_and_lemma_meanings():
-    prompt = tr.explain_prompt(THEOREM, PLAN, CODE)
+    prompt = ex.build_prompt(THEOREM, PLAN, CODE)
     assert "```lean\nnamespace MathFinder" in prompt
     assert "- `frac_sq_nonneg`: (a-b)^2/(ab) is nonnegative" in prompt
 
 
 def test_missing_steps_finds_unmentioned_lemmas():
     text = "**Step 1** (`diff_identity`) ... **Conclusion** (`main`) ..."
-    assert tr.missing_steps(text, PLAN) == ["frac_sq_nonneg"]
+    assert ex.missing_steps(text, PLAN) == ["frac_sq_nonneg"]
 
 
 def test_explain_asks_again_when_a_step_is_missing(fake_llm):
     full = "(`diff_identity`) (`frac_sq_nonneg`) (`main`)"
     prompts = fake_llm("Step 1 (`diff_identity`) only.", full)
-    assert tr.explain(THEOREM, PLAN, CODE) == full
+    assert ex.explain(THEOREM, PLAN, CODE) == full
     assert "no step for: frac_sq_nonneg, main" in prompts[1]
 
 
 @pytest.mark.llm
 def test_real_explanation_has_a_step_per_lemma():
-    markdown = tr.explain(THEOREM, PLAN, CODE)
-    assert tr.missing_steps(markdown, PLAN) == []
+    markdown = ex.explain(THEOREM, PLAN, CODE)
+    assert ex.missing_steps(markdown, PLAN) == []
     assert "## Proof" in markdown

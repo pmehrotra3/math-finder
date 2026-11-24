@@ -1,38 +1,78 @@
 # Math Finder
 
 [![CI](https://github.com/pmehrotra3/math-finder/actions/workflows/ci.yml/badge.svg)](https://github.com/pmehrotra3/math-finder/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-An automated reasoning system that turns a theorem written in LaTeX into a machine-checked Lean 4 proof.
-A language model proposes the ideas; a proof counts only after Lean accepts it.
+**You write a theorem. Math Finder finds a proof, and Lean checks that it is correct.**
+
+AI models can write convincing proofs that are wrong. Lean is a program that checks a proof step by step and rejects
+any mistake. Math Finder combines them: the AI (Claude) has the ideas, and a proof counts only once Lean accepts it.
+
+## An example
+
+You type: *For every integer n, 6 divides n³ − n.*
+
+| Step | What happened in a real run |
+|---|---|
+| 1. Translate | Claude writes it in Lean: `(n : ℤ) : 6 ∣ n ^ 3 - n`. You confirm that is what you meant. |
+| 2. Plan | Claude suggests working with remainders modulo 6, and splits the proof into three small lemmas. |
+| 3. Prove | Lean's automation proves the first lemma. Claude proves the other two. |
+| 4. Check | Lean checks the complete proof. |
+| 5. Improve | Claude tries shorter proofs. Lean accepts one with no helper lemmas. |
+| 6. Explain | You get the Lean proof and an explanation in ordinary mathematics. |
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    A[LaTeX theorem] --> B[Formalize in Lean]
-    B --> C{You approve?}
-    C -->|yes| D[Automation]
-    D -->|not enough| E[Plan lemmas]
-    E --> F[Prove each lemma]
-    F -->|Lean error| G[Repair]
-    G --> F
-    F -->|stuck| H[Split into smaller lemmas]
-    H --> F
-    F -->|all proved| I[Final Lean check]
-    F -->|plan failed| E
-    D -->|proved| I
-    I --> J[Shorter proof + explanation]
+    A[Your theorem] --> B[Translate to Lean]
+    B --> C[You approve]
+    C --> D[Plan small lemmas]
+    D --> E[Prove each lemma]
+    E -->|all proved| F[Final Lean check]
+    F --> G[Improve and explain]
+    E -->|Lean error| E
+    E -->|plan fails| D
 ```
 
-- **Formalize:** the Lean statement is translated back to LaTeX without seeing the original, then compared with it.
-- **Plan:** the model splits the theorem into small lemmas. Lean checks that they imply the theorem before any is proved.
-- **Prove:** automatic tactics and a counterexample search run first. The model is asked only when they fail, and it
-  sees Lean's errors when it repairs an attempt.
-- **Check:** the final proof must have no errors, no `sorry`, and only Lean's three standard axioms.
-- **Collaborate:** in the web page you can give hints, suggest or reject lemmas, and answer questions mid-search.
+- **Translate:** the Lean version is translated back without seeing your original, then the two are compared.
+- **Plan:** before proving any lemma, Lean checks that the lemmas together really imply the theorem.
+- **Prove:** automatic tactics and a search for counterexamples come first. Claude is asked only if they fail, and it
+  sees Lean's errors when it tries again. A lemma that stays stuck is split into smaller ones.
+- **Check:** the final proof may contain no errors, no gaps (`sorry`), and only Lean's three standard axioms.
+- **Work together:** in the web page you can give hints, suggest or reject lemmas, and answer its questions.
 
-Lean runs in long-lived REPL processes that load Mathlib once. On one five-proof file this cut a check from
-2.78 s to 74 ms (medians).
+## Find your way around the code
+
+Start with `pipeline.py`, then follow a theorem through `translation/`, `proving/` and `lean/`.
+
+```
+src/mathfinder/
+├── pipeline.py          START HERE: one complete run, step by step
+├── translation/         between people and Lean
+│   ├── formalize.py       LaTeX → Lean statement
+│   └── explain.py         Lean proof → explanation
+├── proving/             finding the proof
+│   ├── search.py          the main loop: plan, prove, check, try again
+│   ├── planner.py         asks Claude for plans made of small lemmas
+│   ├── prover.py          proves one lemma, repairing failed attempts
+│   ├── hammer.py          automatic tactics and counterexamples, no AI
+│   ├── optimize.py        looks for a better proof
+│   └── session.py         your hints and answers during a search
+├── lean/                checking the proof
+│   ├── repl.py            keeps Lean running and sends it code
+│   └── checker.py         the questions we ask Lean, and the final check
+├── interface/           what you use
+│   ├── cli.py             command line
+│   ├── server.py          web server
+│   └── web/               web page
+├── llm.py               talks to Claude
+└── benchmark.py         measures how many problems it solves
+
+lean_env/                pinned versions of Lean, Mathlib and the REPL
+bench/                   benchmark problems and results
+tests/                   tests
+```
 
 ## Setup
 
@@ -58,20 +98,23 @@ The model is Claude, through the [`claude` CLI](https://claude.com/claude-code) 
 ## Usage
 
 ```bash
-uv run uvicorn mathfinder.server:app                                  # web page at http://localhost:8000
-uv run mathfinder prove 'For every integer $n$, $6 \mid n^3 - n$.'    # LaTeX
-uv run mathfinder prove --lean "(n : ℕ) : n + 0 = n"                  # Lean statement
-uv run mathfinder bench                                               # benchmark
+uv run mathfinder serve                                               # web page at http://localhost:8000
+uv run mathfinder prove 'For every integer $n$, $6 \mid n^3 - n$.'    # a theorem in LaTeX
+uv run mathfinder prove --lean "(n : ℕ) : n + 0 = n"                  # a Lean statement
+uv run mathfinder bench                                               # the benchmark
 uv run pytest -m "not lean and not llm"                               # fast tests (no Lean, no model)
 ```
 
-Each run is saved in `runs/` with its Lean proof, explanation and full trace.
+Each run is saved in `runs/` with a full trace. A proved theorem also gets its Lean proof and explanation.
 
 ## Results
 
 20 of 20 proved on a [self-written set](bench/problems.jsonl) of competition-style problems, 8 of them by automation
 alone ([per-problem results](bench/results.md), recorded before the REPL speedup). The set is small and fairly easy:
 it is a regression test, not a miniF2F score.
+
+Lean stays running with Mathlib loaded instead of restarting for each check. On one five-proof file that cut a check
+from 2.78 s to 74 ms (medians).
 
 ## Limitations
 
@@ -80,14 +123,6 @@ it is a regression test, not a miniF2F score.
 - Formalization can still miss the intended meaning, so read the Lean statement before approving it.
 - The `api` backend has been tested only against a fake client.
 
-## Layout
+## License
 
-| Path | Purpose |
-|---|---|
-| `mathfinder/search.py`, `planner.py`, `prover.py` | plan, prove, repair, decompose |
-| `mathfinder/lean.py` | Lean REPL pool and the strict final check |
-| `mathfinder/translate.py` | LaTeX → Lean, and proof → explanation |
-| `mathfinder/optimize.py`, `pipeline.py` | proof polishing; one complete run |
-| `mathfinder/server.py`, `collab.py`, `web/` | web server, live collaboration, page |
-| `mathfinder/cli.py`, `bench.py`, `llm.py` | command line, benchmark, Claude backends |
-| `lean_env/` | pinned Lean toolchain, Mathlib and REPL |
+[MIT](LICENSE)

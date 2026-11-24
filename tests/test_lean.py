@@ -1,4 +1,4 @@
-"""Tests for mathfinder/lean.py.
+"""Tests for mathfinder/lean/.
 
 The ones marked `lean` really run Lean. The first one waits ~30 s for a REPL to load
 Mathlib; after that each check takes well under a second.
@@ -7,16 +7,8 @@ Skip them with:  uv run pytest -m "not lean and not llm"
 
 import pytest
 
-from mathfinder.lean import (
-    HEADER,
-    Decl,
-    check_decls,
-    indent,
-    parse_messages,
-    run_lean,
-    statement_errors,
-    verify_final,
-)
+from mathfinder.lean.checker import Decl, check_decls, indent, statement_errors, verify_final
+from mathfinder.lean.repl import HEADER, parse_messages, run_lean
 
 # ---------- fast tests: no Lean needed ----------
 

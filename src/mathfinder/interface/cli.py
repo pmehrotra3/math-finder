@@ -2,6 +2,7 @@
 
   mathfinder prove "For every integer $n$, $6 \\mid n^3 - n$."
   mathfinder prove --lean "(n : ℤ) : 6 ∣ n ^ 3 - n"
+  mathfinder serve      the web page, at http://localhost:8000
   mathfinder bench
 
 With LaTeX, you first see the Lean statement, its back-translation and the judge's
@@ -11,11 +12,13 @@ opinion, and nothing is searched until you approve.
 import argparse
 from collections.abc import Callable
 
-from mathfinder.bench import load_problems, run_bench
-from mathfinder.lean import statement_errors
-from mathfinder.optimize import METRICS
+import uvicorn
+
+from mathfinder.benchmark import load_problems, run_bench
+from mathfinder.lean.checker import statement_errors
 from mathfinder.pipeline import prove
-from mathfinder.translate import formalize
+from mathfinder.proving.optimize import METRICS
+from mathfinder.translation.formalize import formalize
 
 LEMMA = "{name} : {statement}   [{feedback:.80}]"
 MESSAGES = {
@@ -102,7 +105,13 @@ def main(argv: list[str] | None = None) -> int:
     bench_cmd = commands.add_parser("bench", help="run the benchmark in bench/problems.jsonl")
     bench_cmd.add_argument("--rounds", type=int, default=2, help="planning rounds per problem")
     bench_cmd.add_argument("--only", nargs="*", default=[], help="names of problems to run (default: all)")
+    serve_cmd = commands.add_parser("serve", help="start the web page (on this computer only)")
+    serve_cmd.add_argument("--port", type=int, default=8000)
     args = parser.parse_args(argv)
+
+    if args.command == "serve":
+        uvicorn.run("mathfinder.interface.server:app", port=args.port)
+        return 0
 
     if args.command == "bench":
         problems = [p for p in load_problems() if not args.only or p["name"] in args.only]

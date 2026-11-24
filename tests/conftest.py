@@ -2,7 +2,8 @@ import json
 
 import pytest
 
-from mathfinder import llm, pipeline, prover
+from mathfinder import llm, pipeline
+from mathfinder.proving import prover
 
 
 @pytest.fixture(autouse=True)

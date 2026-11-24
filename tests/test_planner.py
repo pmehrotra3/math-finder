@@ -1,10 +1,10 @@
-"""Tests for mathfinder/planner.py and the skeleton check in mathfinder/search.py."""
+"""Tests for proving/planner.py and the skeleton check in proving/search.py."""
 
 import pytest
 
 from mathfinder import llm
-from mathfinder.planner import Lemma, Plan, build_prompt, parse_plans, propose_plans
-from mathfinder.search import check_skeletons
+from mathfinder.proving.planner import Lemma, Plan, build_prompt, parse_plans, propose_plans
+from mathfinder.proving.search import check_skeletons
 
 AMGM = "(a b : ℝ) : a ^ 2 + b ^ 2 ≥ 2 * a * b"
 

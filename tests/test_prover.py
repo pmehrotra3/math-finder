@@ -1,4 +1,4 @@
-"""Tests for mathfinder/prover.py.
+"""Tests for proving/prover.py and hammer.py.
 
 The Lean tests use a FAKE model with scripted answers, so they're free and
 repeatable while still checking every proof with real Lean.
@@ -6,9 +6,9 @@ repeatable while still checking every proof with real Lean.
 
 import pytest
 
-from mathfinder import prover
-from mathfinder.planner import Lemma
-from mathfinder.prover import counterexample_text, hammer, suggestion
+from mathfinder.proving import prover
+from mathfinder.proving.hammer import counterexample_text, hammer, suggestion
+from mathfinder.proving.planner import Lemma
 
 ODD_SUM = "(n : ℕ) : ∑ i ∈ Finset.range n, (2 * i + 1) = n ^ 2"  # needs induction: the hammer can't
 GOOD = "induction n with\n| zero => simp\n| succ k ih =>\n  rw [Finset.sum_range_succ, ih]\n  ring"

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from mathfinder import PROJECT_ROOT
 from mathfinder.pipeline import RUNS_DIR, tracer
-from mathfinder.search import SearchResult, search
+from mathfinder.proving.search import SearchResult, search
 
 PROBLEMS_FILE = PROJECT_ROOT / "bench" / "problems.jsonl"
 

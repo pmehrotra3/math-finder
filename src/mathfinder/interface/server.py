@@ -1,4 +1,4 @@
-"""The web server. Run it with:  uv run uvicorn mathfinder.server:app
+"""The web server. Run it with:  uv run mathfinder serve
 
   POST /api/formalize               {latex}           → Lean statement + back-translation + judge
   POST /api/check                   {statement}       → Lean errors for an edited statement ([] = fine)
@@ -15,15 +15,17 @@ import asyncio
 import threading
 import uuid
 from dataclasses import asdict
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from mathfinder import PROJECT_ROOT, pipeline, translate
-from mathfinder.collab import Session
-from mathfinder.lean import statement_errors
-from mathfinder.optimize import METRICS
+from mathfinder import pipeline
+from mathfinder.lean.checker import statement_errors
+from mathfinder.proving.optimize import METRICS
+from mathfinder.proving.session import Session
+from mathfinder.translation import formalize as formalizer
 
 app = FastAPI(title="Math Finder")
 
@@ -125,7 +127,7 @@ ACTIONS = {
 
 @app.post("/api/formalize")
 def formalize(req: FormalizeRequest) -> dict:
-    f = translate.formalize(req.latex)
+    f = formalizer.formalize(req.latex)
     return {**asdict(f), "ok": f.ok}
 
 
@@ -176,4 +178,4 @@ async def watch(websocket: WebSocket, run_id: str) -> None:
 
 # Everything that isn't an /api or /ws address is a file from web/ ("/" gives index.html).
 # This must come LAST: a mount at "/" would otherwise catch the API addresses too.
-app.mount("/", StaticFiles(directory=PROJECT_ROOT / "web", html=True), name="web")
+app.mount("/", StaticFiles(directory=Path(__file__).parent / "web", html=True), name="web")

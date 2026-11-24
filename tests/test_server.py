@@ -1,16 +1,17 @@
-"""Tests for mathfinder/pipeline.py and mathfinder/server.py. Lean and the model are faked."""
+"""Tests for pipeline.py and interface/server.py. Lean and the model are faked."""
 
 import json
 
 import pytest
 from fastapi.testclient import TestClient
 
-from mathfinder import pipeline, server
+from mathfinder import pipeline
+from mathfinder.interface import server
 from mathfinder.llm import LLMError
-from mathfinder.optimize import Optimization
-from mathfinder.planner import Plan
-from mathfinder.search import SearchResult
-from mathfinder.translate import Formalization
+from mathfinder.proving.optimize import Optimization
+from mathfinder.proving.planner import Plan
+from mathfinder.proving.search import SearchResult
+from mathfinder.translation.formalize import Formalization
 
 
 def fake_search(statement, hints, rounds, on_event, session):
@@ -82,7 +83,7 @@ def test_run_folders_never_collide():
 
 def test_formalize_endpoint(client, monkeypatch):
     f = Formalization("x", "(n : ℕ) : n = n", "For all n, n = n.", True, "same")
-    monkeypatch.setattr(server.translate, "formalize", lambda latex: f)
+    monkeypatch.setattr(server.formalizer, "formalize", lambda latex: f)
     data = client.post("/api/formalize", json={"latex": "$n = n$"}).json()
     assert data["statement"] == "(n : ℕ) : n = n" and data["ok"] and data["faithful"]
 

@@ -17,7 +17,7 @@ And the search can ASK you: ask(question) waits until you call answer(...).
 import queue
 import threading
 
-from mathfinder.planner import Lemma, Plan
+from mathfinder.proving.planner import Lemma, Plan
 
 
 def normalize(statement: str) -> str:

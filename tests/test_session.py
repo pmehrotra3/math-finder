@@ -1,4 +1,4 @@
-"""Tests for mathfinder/collab.py and how search() works with a Session.
+"""Tests for proving/session.py and how search() works with a Session.
 
 Lean and the model are replaced by fakes, so these run instantly. Threads play
 the user acting while the search runs.
@@ -10,9 +10,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from mathfinder import search as search_module
-from mathfinder.collab import Session
-from mathfinder.planner import Lemma, Plan
+from mathfinder.proving import search as search_module
+from mathfinder.proving.planner import Lemma, Plan
+from mathfinder.proving.session import Session
 
 # ---------- the Session on its own ----------
 

@@ -1,5 +1,7 @@
-"""One complete run, shared by the command line and the web server:
-search for a proof, polish it, explain it, and save everything in runs/<date-time>/.
+"""START HERE. One complete run, from an approved Lean statement to a saved, explained proof.
+
+The command line and the web server both call `prove`. (Turning LaTeX into the statement
+happens before this, in translation/formalize.py, because a person must approve it.)
 """
 
 import json
@@ -9,12 +11,12 @@ from datetime import datetime
 from pathlib import Path
 
 from mathfinder import PROJECT_ROOT
-from mathfinder.collab import Session
-from mathfinder.lean import HEADER
+from mathfinder.lean.repl import HEADER
 from mathfinder.llm import LLMError
-from mathfinder.optimize import optimize
-from mathfinder.search import OnEvent, search
-from mathfinder.translate import explain
+from mathfinder.proving.optimize import optimize
+from mathfinder.proving.search import OnEvent, search
+from mathfinder.proving.session import Session
+from mathfinder.translation.explain import explain
 
 RUNS_DIR = PROJECT_ROOT / "runs"
 
@@ -60,6 +62,7 @@ def prove(
         log(event)
         on_event(event)
 
+    # 1. Search for a proof that Lean accepts.
     log({"kind": "meta", "theorem": theorem})
     result = search(statement, hints=hints, rounds=rounds, on_event=emit, session=session)
     used_hints = [*hints, *(session.hints() if session else [])]
@@ -77,6 +80,7 @@ def prove(
     if not result.proved:
         return outcome
 
+    # 2. Look for a better proof.
     plan = result.plan
     if metric:
         better = optimize(statement, result.lean_code, plan, metric, emit)
@@ -86,6 +90,7 @@ def prove(
             plan=plan.sketch,
             optimization={"metric": metric, "before": better.original, "after": better.best},
         )
+    # 3. Explain it in words.
     if explained:
         emit({"kind": "explaining"})
         try:
@@ -93,6 +98,7 @@ def prove(
         except LLMError as e:  # the proof is still valid; only the write-up failed
             outcome["explanation"] = f"(could not write an explanation: {e})"
 
+    # 4. Save everything.
     (folder / "theorem.txt").write_text(theorem + "\n")
     (folder / "proof.lean").write_text(HEADER + outcome["lean_code"])  # Lean can check this file on its own
     (folder / "explanation.md").write_text(outcome["explanation"] + "\n")

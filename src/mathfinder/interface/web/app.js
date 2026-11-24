@@ -1,4 +1,4 @@
-// Math Finder web page. Talks to mathfinder/server.py: REST for actions, a WebSocket for live events.
+// Math Finder web page. Talks to interface/server.py: REST for actions, a WebSocket for live events.
 
 const $ = (id) => document.getElementById(id);
 

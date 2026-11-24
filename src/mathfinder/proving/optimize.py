@@ -16,10 +16,10 @@ AND passes the strict final verification. The original proof is never lost.
 from dataclasses import dataclass
 
 from mathfinder import llm
-from mathfinder.lean import Decl, check_decls, verify_final
-from mathfinder.planner import Plan
-from mathfinder.prover import parse_proofs
-from mathfinder.search import NAMESPACE, OnEvent, assemble
+from mathfinder.lean.checker import Decl, check_decls, verify_final
+from mathfinder.proving.planner import Plan
+from mathfinder.proving.prover import parse_proofs
+from mathfinder.proving.search import NAMESPACE, OnEvent, assemble
 
 CANDIDATES = 4
 HEAVY = ("nlinarith", "polyrith", "aesop", "simp_all", "decide", "exact?")

@@ -1,10 +1,10 @@
-"""Tests for mathfinder/search.py."""
+"""Tests for proving/search.py."""
 
 import pytest
 
-from mathfinder import planner, prover
-from mathfinder.planner import Lemma, Plan
-from mathfinder.search import assemble, score, search, splice
+from mathfinder.proving import planner, prover
+from mathfinder.proving.planner import Lemma, Plan
+from mathfinder.proving.search import assemble, score, search, splice
 
 ODD_SUM = "(n : ℕ) : ∑ i ∈ Finset.range n, (2 * i + 1) = n ^ 2"
 INDUCTION = "induction n with\n| zero => simp\n| succ k ih =>\n  rw [Finset.sum_range_succ, ih]\n  ring"
