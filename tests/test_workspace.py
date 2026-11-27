@@ -133,3 +133,25 @@ def test_a_plan_without_lemmas_tries_its_own_proof_first(fake):
     ws.run(lambda: ws.prove("main"))
     assert ws.goals["main"].status == "proved" and ws.goals["main"].proof == "omega"
     assert ws.goals["main"].attempts[0]["source"] == "plan" and fake["proved"] == []  # no model needed
+
+
+@pytest.mark.lean
+def test_citing_an_established_project_passes_the_real_final_check(monkeypatch):
+    """Real Lean: project A proves a² + b² ≥ 2ab; project B cites it to prove x² + 1 ≥ 2x."""
+    from mathfinder.interface.server import in_namespace
+
+    monkeypatch.setattr(wsmod, "to_latex", lambda name, lean: "")  # no model needed
+    amgm = "(a b : ℝ) : a ^ 2 + b ^ 2 ≥ 2 * a * b"
+    a = Workspace(amgm)
+    a.set_plan("main", "", "nlinarith [sq_nonneg (a - b)]", [])
+    a.run(lambda: a.prove("main"))
+    project_a = in_namespace(a.finish()["own_code"], "Project_aaaa1111")
+
+    b = Workspace("(x : ℝ) : x ^ 2 + 1 ≥ 2 * x", library_code=lambda ids: project_a if ids else "")
+    lemma = {"name": "amgm", "lean": amgm, "established_by": "aaaa1111"}
+    assert b.set_plan("main", "AM-GM with b = 1", "have h := amgm x 1\nnlinarith [h]", [lemma]) == []
+    assert b.goals["amgm"].status == "proved", b.goals["amgm"].feedback
+    b.run(lambda: b.prove("main"))
+    final = b.finish()
+    assert final["ok"], final["errors"]
+    assert final["lean_code"].startswith("namespace Project_aaaa1111")

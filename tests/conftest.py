@@ -41,7 +41,7 @@ def fake(monkeypatch):
     """Lemmas called good_* get proved, bad_* get stuck. Every plan fits; LaTeX is "$<lean>$"."""
     seen = {"proved": [], "events": []}
 
-    def prove_lemma(lemma, earlier, on_attempt):
+    def prove_lemma(lemma, earlier, on_attempt, background=""):
         ok = lemma.name.startswith("good")
         seen["proved"].append((lemma.name, [e.name for e in earlier]))
         on_attempt({"proof": "simp", "ok": ok, "error": "" if ok else "simp failed", "source": "llm"})

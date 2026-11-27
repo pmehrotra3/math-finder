@@ -31,7 +31,15 @@ Math Finder works like a proof assistant sitting next to you.
 4. **Check and explain.** When the theorem is proved with nothing assumed, the whole tree goes through Lean's
    final check (no gaps, only standard axioms) and you get an explanation in ordinary mathematics.
 
-The command line (`mathfinder prove`) runs the same steps automatically, without the workspace.
+### Projects
+
+Every theorem is a **project**, saved on your computer, so you can keep many of them and come back later. A project
+whose proof passed the final check is **established**: in any other project you can use its theorem as a lemma.
+Lean still checks everything. The established project's verified code is included in the new proof, in a namespace
+of its own, and the lemma is proved by applying that project's theorem. Projects that cite each other in a circle
+are refused, and a project can't be deleted while another one cites it.
+
+The command line (`mathfinder prove`) runs the same steps automatically, without the workspace or projects.
 
 ## How the automatic search works
 
@@ -76,13 +84,14 @@ src/mathfinder/
 │   ├── cli.py             command line
 │   ├── server.py          web server
 │   └── web/               web page
+├── projects.py          saved projects, and the established results they share
 ├── benchmark/           the test problems, and how many it solves
 ├── assistant.py         the side assistant that answers your questions
 └── llm.py               talks to Claude
 
 lean/                    pinned versions of Lean, Mathlib and the REPL
 tests/                   tests
-runs/                    your results (created when you run it; not in git)
+runs/                    your projects and results (created when you run it; not in git)
 ```
 
 ## Setup

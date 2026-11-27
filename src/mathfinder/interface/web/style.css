@@ -92,6 +92,10 @@ textarea, input[type="text"], input:not([type]) {
   border-radius: 10px; padding: 11px 13px; font: 14px/1.5 var(--mono); resize: vertical;
   transition: border-color .15s, box-shadow .15s;
 }
+select {
+  max-width: 100%; background: var(--surface); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 8px; font: 13px var(--sans);
+}
 textarea:focus, input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 ::placeholder { color: var(--faint); }
 .examples { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 22px 0 18px; }
@@ -288,6 +292,23 @@ textarea:focus, input:focus { outline: none; border-color: var(--accent); box-sh
 .activity time { color: var(--faint); font: 11px var(--mono); padding-top: 2px; }
 .activity li.error { color: var(--bad); }
 
+/* ---------- projects ---------- */
+.project-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin-top: 6px; }
+.project-card { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+.project-card.established { border-color: color-mix(in srgb, var(--ok) 50%, transparent); }
+.project-card .title { font-size: 15px; overflow-wrap: anywhere; }
+.project-card .meta { color: var(--faint); font-size: 12px; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.project-card .buttons { display: flex; gap: 6px; margin-top: auto; }
+.badge.established { background: var(--ok-soft); color: var(--ok); }
+.ws-bar-left { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-width: 0; }
+.cited { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ok); }
+.cited button { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; }
+.library { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.library-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; padding: 10px 12px; border-radius: 10px; background: var(--surface-2); }
+.library-item .lemma-lean { grid-column: 1; }
+.library-item .btn { grid-row: 1 / span 2; grid-column: 2; }
+.editor-row .readonly { opacity: .8; }
+
 /* ---------- result ---------- */
 .result-head { display: flex; align-items: center; gap: 16px; }
 .result-head > div { flex: 1; min-width: 0; }
@@ -334,3 +355,4 @@ pre .cm { color: var(--cm); font-style: italic; }
   .proof { position: static; }
   .result-head { flex-wrap: wrap; }
 }
+.editor > .btn { align-self: flex-start; }

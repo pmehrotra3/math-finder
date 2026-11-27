@@ -77,6 +77,18 @@
     </div>
   </section>
 
+  <!-- your projects: every theorem you have worked on -->
+  <section id="projects-panel" class="panel hidden">
+    <div class="section-head">
+      <div>
+        <h2>Your projects</h2>
+        <p class="lead">Every theorem is a project, saved on this computer. A project whose proof passed the final
+          check is <b>established</b>: other projects can use its theorem as a lemma.</p>
+      </div>
+    </div>
+    <div id="project-list" class="project-list"></div>
+  </section>
+
   <!-- 2. confirm the Lean statement -->
   <section id="step-approve" class="panel hidden">
     <div class="panel-head">
@@ -102,7 +114,10 @@
   <!-- 3. the workspace: plan and prove together -->
   <section id="step-workspace" class="panel workspace hidden">
     <div class="ws-bar">
-      <nav id="breadcrumb" class="breadcrumb" aria-label="Where you are in the proof"></nav>
+      <div class="ws-bar-left">
+        <button id="all-projects-btn" class="btn tiny">← All projects</button>
+        <nav id="breadcrumb" class="breadcrumb" aria-label="Where you are in the proof"></nav>
+      </div>
       <div class="ws-bar-right">
         <span id="job" class="job hidden"><span class="spinner"></span><span id="job-text">Working…</span></span>
         <button id="stop-btn" class="btn danger hidden">Stop</button>
@@ -160,7 +175,7 @@
         <h2 id="result-title">Result</h2>
         <p class="lead" id="result-sub"></p>
       </div>
-      <button id="again-btn" class="btn">Prove another</button>
+      <button id="again-btn" class="btn">All projects</button>
     </div>
     <div id="metrics" class="metrics"></div>
     <div class="result-grid">

@@ -10,7 +10,12 @@ LaTeX version of it, and either a direct proof or a PLAN: an idea, a list of sma
   prove(goal)           prove it: children first, then its main proof (or directly, if no plan)
   auto(goal)            let the full search find a plan and proofs on its own
   assume(goal)          skip it for now; everything above it then counts as "proved, assuming"
+  use_established(goal, project)
+                        prove it by citing a theorem another project already established
   finish()              put the whole tree into one Lean file and run the strict final check
+
+The workspace itself doesn't know where projects are stored: the server gives it a
+`library_code` function that returns the verified Lean of the projects it cites.
 """
 
 import re
@@ -42,6 +47,7 @@ class Goal:
     feedback: str = ""  # the latest Lean error or counterexample
     problems: list[str] = field(default_factory=list)  # why the plan doesn't fit together yet
     attempts: list[dict] = field(default_factory=list)  # every proof Lean checked for this goal
+    established_by: str = ""  # id of the project whose established theorem proves this goal
 
 
 class Busy(Exception):
@@ -49,9 +55,21 @@ class Busy(Exception):
 
 
 class Workspace:
-    def __init__(self, statement: str, latex: str = "", on_event: Callable[[dict], None] = lambda e: None):
-        self.goals = {ROOT: Goal(ROOT, statement, latex)}
+    def __init__(
+        self,
+        statement: str,
+        latex: str = "",
+        on_event: Callable[[dict], None] = lambda e: None,
+        library_code: Callable[[list[str]], str] = lambda project_ids: "",
+        goals: dict | None = None,
+    ):
+        """A new workspace for `statement`, or a saved one when `goals` (from to_dict) is given."""
+        if goals:
+            self.goals = {name: Goal(**fields) for name, fields in goals.items()}
+        else:
+            self.goals = {ROOT: Goal(ROOT, statement, latex)}
         self.on_event = on_event
+        self.library_code = library_code
         self.session = Session()  # lets the user stop a running job
         self._job = threading.Lock()
 
@@ -94,6 +112,22 @@ class Workspace:
             return []
         earlier = parent.children[: parent.children.index(name)]
         return [n for sibling in earlier for n in [*self.descendants(sibling), sibling]]
+
+    def projects_used(self) -> list[str]:
+        """Ids of the established projects this workspace cites, in the order they were first used."""
+        used = []
+        for g in self.goals.values():
+            if g.established_by and g.established_by not in used:
+                used.append(g.established_by)
+        return used
+
+    def background(self) -> str:
+        """Lean code that every check needs first: the established results this workspace cites."""
+        return self.library_code(self.projects_used())
+
+    def saved_goals(self) -> dict:
+        """The goals as plain data, for saving to disk (Workspace(..., goals=...) reads it back)."""
+        return {name: asdict(g) for name, g in self.goals.items()}
 
     def to_dict(self) -> dict:
         goals = {}
@@ -167,6 +201,8 @@ class Workspace:
                     self.goals[n] = old_goals[n]
             else:
                 self.goals[lemma_name] = Goal(lemma_name, lean, lemma.get("latex", ""), lemma.get("informal", ""))
+                if lemma.get("established_by"):
+                    self.goals[lemma_name].established_by = lemma["established_by"]
 
         goal.children = new_names
         goal.sketch = sketch.strip()
@@ -174,6 +210,10 @@ class Workspace:
         if goal.status != "assumed":
             goal.status = "open"
         self._fill_latex(new_names)
+        for n in new_names:  # lemmas taken from established projects: cite them now
+            lemma_goal = self.goals[n]
+            if lemma_goal.established_by and lemma_goal.status != "proved":
+                self._cite(lemma_goal)
         goal.problems = self._plan_problems(goal)
         self._emit_goal(name)
         return goal.problems
@@ -238,6 +278,25 @@ class Workspace:
             g.status = "open"
         self._emit_goal(name)
 
+    def use_established(self, name: str, project_id: str) -> None:
+        """Prove `name` by citing the main theorem of an established project."""
+        g = self.goals[name]
+        for n in self.descendants(name):  # a cited result needs no plan of its own
+            del self.goals[n]
+        g.children, g.sketch, g.problems = [], "", []
+        g.established_by = project_id
+        self._cite(g)
+        self._log(f"{name}: " + ("proved by citing an established project" if g.status == "proved" else g.feedback))
+        self._emit_goal(name)
+
+    def _cite(self, g: Goal) -> None:
+        """Ask Lean whether the established theorem proves `g`. Its statement must match, up to
+        hypotheses that `assumption` can fill in."""
+        g.proof = f"apply Project_{g.established_by}.main <;> assumption"
+        self._check_main_proof(g)
+        if g.status != "proved":
+            g.feedback = "the established theorem doesn't prove this statement: " + g.feedback
+
     def _fill_latex(self, names: list[str]) -> None:
         """Write the missing LaTeX from the Lean, several at a time."""
         missing = [n for n in names if not self.goals[n].latex]
@@ -289,9 +348,12 @@ class Workspace:
             self.on_event({"kind": "attempt", "name": g.name, "ok": attempt["ok"], "source": attempt["source"]})
 
         usable = self.lemmas_for(self.context_for(g.name))
-        lemma = prove_lemma(Lemma(name=g.name, statement=g.lean, informal=g.informal), usable, record)
+        lemma = Lemma(name=g.name, statement=g.lean, informal=g.informal)
+        lemma = prove_lemma(lemma, usable, record, background=self.background())
         g.status = lemma.status if lemma.status != "open" else "stuck"
         g.proof, g.feedback = lemma.proof, lemma.feedback
+        if g.status == "proved":
+            g.established_by = ""  # proved on its own, so it no longer relies on another project
 
     def _check_main_proof(self, g: Goal) -> None:
         if not g.proof:
@@ -301,7 +363,8 @@ class Workspace:
         if any(self.goals[n].status not in ("proved", "assumed") for n in below):
             g.status, g.feedback = "stuck", "some of its lemmas are not proved yet"
             return
-        preamble = preamble_for(self.lemmas_for([*self.context_for(g.name), *below]))
+        lemmas_preamble = preamble_for(self.lemmas_for([*self.context_for(g.name), *below]))
+        preamble = (self.background() + "\n\n" + lemmas_preamble).strip()
         result = check_decls([Decl(g.name, g.lean, g.proof)], preamble)[g.name]
         g.attempts.append(
             {"proof": g.proof, "ok": result.ok, "error": "\n".join(result.errors)[:MAX_ERROR], "source": "plan"}
@@ -354,9 +417,10 @@ class Workspace:
         if assumed := self.assumed_below(ROOT):
             raise ValueError(f"still assumed, not proved: {', '.join(assumed)}")
         plan = Plan(root.sketch, self.lemmas_for(self.descendants(ROOT)), root.proof)
-        code = assemble(root.lean, plan)
-        final = verify_final(code, f"{NAMESPACE}.main")
-        return {"ok": final.ok, "errors": final.errors, "lean_code": code, "plan": plan}
+        own_code = assemble(root.lean, plan)  # this project's lemmas and theorem
+        full_code = (self.background() + "\n\n" + own_code).strip()  # plus the established results it cites
+        final = verify_final(full_code, f"{NAMESPACE}.main")
+        return {"ok": final.ok, "errors": final.errors, "lean_code": full_code, "own_code": own_code, "plan": plan}
 
 
 def subtree(goals: dict[str, Goal], name: str) -> list[str]:

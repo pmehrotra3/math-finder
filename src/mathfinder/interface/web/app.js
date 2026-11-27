@@ -1,5 +1,6 @@
 // Math Finder web page. Talks to interface/server.py: REST for actions, a WebSocket for live changes.
 //
+// Every theorem is a PROJECT, saved on the server; the home page lists them.
 // 1. Write   - you type a theorem in LaTeX.
 // 2. Confirm - it is translated into Lean; you check that it says what you mean.
 // 3. Plan & prove - the workspace: the theorem and its lemmas as a tree. You zoom in on one goal,
@@ -10,7 +11,10 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
   latex: "",          // the theorem as you wrote it
-  workspaceId: null,
+  projectId: null,    // the open project
+  project: null,      // {id, title, latex, established, conversation, result}
+  library: null,      // established results the open project may cite (loaded when needed)
+  choosing: null,     // the goal for which you are choosing an established result
   ws: null,           // the workspace from the server: {root, goals: {name: goal}, busy}
   focus: "main",      // the goal you are looking at (zoomed in on)
   options: {},        // plans the model proposed, per goal: {name: [option, ...]}
@@ -185,8 +189,8 @@ async function checkEdit() {
 async function approve() {
   $("approve-btn").disabled = true;
   try {
-    const { id, workspace } = await post("/api/workspaces", { statement: $("statement").value, latex: state.latex });
-    openWorkspace(id, workspace);
+    const project = await post("/api/projects", { statement: $("statement").value, latex: state.latex });
+    openProject(project);
   } catch (e) {
     $("check-errors").className = "notice bad";
     $("check-errors").textContent = "Error: " + e.message;
@@ -197,23 +201,119 @@ async function approve() {
 
 // ---------- step 3: the workspace ----------
 
-function openWorkspace(id, workspace) {
-  Object.assign(state, { workspaceId: id, ws: workspace, focus: "main", options: {}, editing: null, activity: 0 });
+// ---------- projects ----------
+
+async function get(path) {
+  const response = await fetch(path);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || response.statusText);
+  return data;
+}
+
+async function loadProjects() {
+  const { projects } = await get("/api/projects");
+  const list = $("project-list");
+  list.innerHTML = "";
+  $("projects-panel").classList.toggle("hidden", projects.length === 0);
+  projects.forEach((p) => {
+    const card = el("div", "project-card" + (p.status === "established" ? " established" : ""));
+    const title = el("div", "title math");
+    showText(title, p.title);
+    const meta = el("div", "meta");
+    meta.append(el("span", "", `${p.lemmas} lemma${p.lemmas === 1 ? "" : "s"}`),
+                el("span", "", `changed ${timeAgo(p.updated)}`));
+    if (p.uses.length) meta.append(el("span", "", `builds on ${p.uses.length} project${p.uses.length === 1 ? "" : "s"}`));
+    const buttons = el("div", "buttons");
+    buttons.append(button("Open", () => openProjectById(p.id), "btn tiny primary"));
+    buttons.append(button("Delete", () => deleteProject(p), "btn tiny danger"));
+    card.append(statusBadgeFor(p.status), title, meta, buttons);
+    list.append(card);
+  });
+}
+
+function statusBadgeFor(status) {
+  const text = { established: "established", proved: "proved, not yet checked as a whole" }[status] || STATUS_TEXT[status] || status;
+  const badge = el("span", "badge " + status, text);
+  badge.style.alignSelf = "flex-start";
+  return badge;
+}
+
+function timeAgo(seconds) {
+  const minutes = Math.round((Date.now() / 1000 - seconds) / 60);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 60 * 24) return `${Math.round(minutes / 60)} h ago`;
+  return new Date(seconds * 1000).toLocaleDateString();
+}
+
+async function deleteProject(p) {
+  if (!confirm(`Delete this project? This cannot be undone.\n\n${p.title}`)) return;
+  try {
+    await fetch(`/api/projects/${p.id}`, { method: "DELETE" }).then(async (r) => {
+      if (!r.ok) throw new Error((await r.json()).detail);
+    });
+  } catch (e) {
+    alert("Couldn't delete it: " + e.message);
+  }
+  loadProjects();
+}
+
+async function openProjectById(id) {
+  try {
+    openProject(await get(`/api/projects/${id}`));
+  } catch (e) {
+    alert("Couldn't open the project: " + e.message);
+    location.hash = "";
+  }
+}
+
+let socket = null;
+
+function openProject(project) {
+  Object.assign(state, {
+    projectId: project.id, project, ws: project.workspace, focus: "main", options: {}, editing: null,
+    activity: 0, library: null, choosing: null, latex: project.latex,
+  });
+  location.hash = `project=${project.id}`;
   $("activity").innerHTML = "";
+  $("activity-count").textContent = "";
   $("conversation").innerHTML = "";
-  $("step-result").classList.add("hidden");
+  project.conversation.forEach(([question, answer]) => {
+    $("conversation").append(el("div", "bubble you", question));
+    const bubble = el("div", "bubble assistant");
+    renderMarkdown(bubble, answer);
+    $("conversation").append(bubble);
+  });
+  ["step-input", "projects-panel", "step-approve", "step-result"].forEach((id) => $(id).classList.add("hidden"));
   setStep("workspace");
   render();
   reveal("step-workspace");
+  if (project.result && project.result.proved) showResult(project.result, false);
 
+  if (socket) socket.close();
   const protocol = location.protocol === "https:" ? "wss" : "ws";
-  const socket = new WebSocket(`${protocol}://${location.host}/ws/${id}`);
+  socket = new WebSocket(`${protocol}://${location.host}/ws/${project.id}`);
   socket.onmessage = (message) => handleEvent(JSON.parse(message.data));
-  socket.onclose = () => addActivity("Connection to the server closed.", "error");
+}
+
+function goHome() {
+  if (socket) { socket.close(); socket = null; }
+  Object.assign(state, { projectId: null, project: null, ws: null });
+  location.hash = "";
+  ["step-approve", "step-workspace", "step-result"].forEach((id) => $(id).classList.add("hidden"));
+  $("step-input").classList.remove("hidden");
+  setStep("write");
+  loadProjects();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function loadLibrary() {
+  if (!state.library) state.library = (await get(`/api/projects/${state.projectId}/library`)).results;
+  return state.library;
 }
 
 function goalAction(name, action, body = {}) {
-  return post(`/api/workspaces/${state.workspaceId}/goals/${encodeURIComponent(name)}/${action}`, body);
+  return post(`/api/projects/${state.projectId}/goals/${encodeURIComponent(name)}/${action}`, body);
 }
 
 function handleEvent(e) {
@@ -229,6 +329,8 @@ function handleEvent(e) {
       addActivity(e.text, "error");
       break;
     case "finished":
+      state.project.result = e.result;
+      if (e.established) state.project.established = true;
       showResult(e.result);
       break;
   }
@@ -362,6 +464,11 @@ function renderFocus() {
   statement.append(leanRow, latexRow);
   box.append(statement);
 
+  if (g.name === "main" && state.project.established) {
+    box.append(el("div", "ok-box", "✓ Established: the whole proof passed Lean's final check. " +
+      "Other projects can now use this theorem as a lemma."));
+  }
+  if (g.established_by) box.append(citedNote(g));
   if (g.assumes.length && g.status === "proved") {
     box.append(el("div", "warn-box", `Proved, but only if these assumed lemmas hold: ${g.assumes.join(", ")}. Prove them to finish.`));
   }
@@ -374,11 +481,14 @@ function renderFocus() {
   const auto = button("Let the search find a proof", () => attempt(goalAction(g.name, "auto")));
   const assumeLabel = g.status === "assumed" ? "Stop assuming it" : "Assume it for now";
   const assume = button(assumeLabel, () => applyWorkspace(goalAction(g.name, "assume", { on: g.status !== "assumed" })));
-  [prove, auto, assume].forEach((b) => { b.disabled = busyNow; });
-  if (g.status === "proved") prove.disabled = auto.disabled = true;
+  const cite = button("Use an established result", () => chooseEstablished(g.name));
+  [prove, auto, assume, cite].forEach((b) => { b.disabled = busyNow; });
+  if (g.status === "proved") prove.disabled = auto.disabled = cite.disabled = true;
   if (g.name === "main" || g.status === "proved") assume.disabled = true;
   actions.append(prove, auto, assume);
+  if (g.name !== "main") actions.append(cite);
   box.append(actions);
+  if (state.choosing === g.name) box.append(libraryChooser(g));
 
   // --- the plan
   box.append(state.editing && state.editing.goal === g.name ? planEditor(g) : planSection(g, busyNow));
@@ -435,6 +545,7 @@ function lemmaCard(lemma, busyNow) {
   if (lemma.latex) showText(latex, lemma.latex);
   card.append(title, leanCode(lemma.name, lemma.lean), latex);
   card.querySelector("code").className = "lemma-lean";
+  if (lemma.established_by) card.append(citedNote(lemma));
   if (lemma.feedback && ["stuck", "refuted"].includes(lemma.status)) card.append(el("div", "lemma-feedback", lemma.feedback));
   const buttons = el("div", "lemma-buttons");
   buttons.append(button("Zoom in →", () => zoom(lemma.name), "btn tiny"));
@@ -502,7 +613,7 @@ async function usePlan(g, plan) {
   addActivity(`Using a plan for ${g.name}; Lean is checking it and the LaTeX is being written…`);
   const answer = await attempt(goalAction(g.name, "plan", {
     sketch: plan.sketch, main_proof: plan.main_proof,
-    lemmas: plan.lemmas.map((l) => ({ name: l.name, lean: l.lean, latex: l.latex || "" })),
+    lemmas: plan.lemmas.map((l) => ({ name: l.name, lean: l.lean, latex: l.latex || "", established_by: l.established_by || "" })),
   }));
   if (!answer) return false;
   state.ws = answer.workspace;
@@ -515,7 +626,8 @@ async function usePlan(g, plan) {
 
 function startEditing(g, from) {
   const source = from || { sketch: g.sketch, main_proof: g.proof,
-                           lemmas: g.children.map((n) => ({ name: n, lean: goal(n).lean, latex: goal(n).latex })) };
+                           lemmas: g.children.map((n) => ({ name: n, lean: goal(n).lean, latex: goal(n).latex,
+                                                            established_by: goal(n).established_by })) };
   state.editing = { goal: g.name, sketch: source.sketch, main_proof: source.main_proof,
                     lemmas: source.lemmas.map((l) => ({ ...l })) };
   render();
@@ -551,6 +663,7 @@ function planEditor(g) {
     lean.value = lemma.lean;
     lean.placeholder = "(a b : ℝ) : 0 ≤ (a - b) ^ 2";
     lean.oninput = () => { lemma.lean = lean.value; lemma.latex = ""; };
+    if (lemma.established_by) { lean.readOnly = true; lean.className = "readonly"; lean.title = "From an established project"; }
     const remove = button("×", () => { draft.lemmas.splice(i, 1); render(); }, "btn editor-remove");
     remove.title = "Remove this lemma";
     row.append(name, lean, remove);
@@ -560,6 +673,26 @@ function planEditor(g) {
     draft.lemmas.push({ name: `step_${draft.lemmas.length + 1}`, lean: "", latex: "" });
     render();
   }, "btn tiny"));
+  const fromLibrary = el("div", "goal-actions");
+  fromLibrary.style.marginTop = "0";
+  fromLibrary.append(button("+ Add an established result", async () => {
+    const results = await attempt(loadLibrary());
+    if (!results) return;
+    if (!results.length) {
+      addActivity("No established results yet: finish a project first.", "error");
+      showTab("activity");
+      return;
+    }
+    const pick = el("select");
+    results.forEach((r) => pick.append(new Option(`${r.title}   [${r.statement}]`, r.id)));
+    const add = button("Add", () => {
+      const r = results.find((x) => x.id === pick.value);
+      draft.lemmas.push({ name: `cited_${r.id}`, lean: r.statement, latex: r.latex, established_by: r.id });
+      render();
+    }, "btn tiny primary");
+    fromLibrary.replaceChildren(pick, add);
+  }, "btn tiny"));
+  editor.append(fromLibrary);
 
   const main = el("label", "field");
   const mainInput = el("textarea");
@@ -605,7 +738,9 @@ function editStatement(g, row) {
 
 function proofSection(g) {
   const section = el("div", "section");
-  section.append(el("div", "section-head")).append(el("h3", "", "Proof (Lean)"));
+  const head = el("div", "section-head");
+  head.append(el("h3", "", "Proof (Lean)"));
+  section.append(head);
   const pre = el("pre");
   pre.innerHTML = highlightLean(g.proof);
   section.append(pre);
@@ -634,6 +769,51 @@ async function applyWorkspace(request) {
   render();
 }
 
+// ---------- citing established results from other projects ----------
+
+function citedNote(g) {
+  const note = el("div", "cited", "✓ Established in another project · ");
+  note.append(button("open that project", () => openProjectById(g.established_by), ""));
+  return note;
+}
+
+async function chooseEstablished(goalName) {
+  state.choosing = state.choosing === goalName ? null : goalName;
+  if (state.choosing) await attempt(loadLibrary());
+  render();
+}
+
+function libraryChooser(g) {
+  const box = el("div", "section");
+  const head = el("div", "section-head");
+  head.append(el("h3", "", "Established results you can use"));
+  head.append(button("Close", () => { state.choosing = null; render(); }, "btn tiny"));
+  box.append(head);
+  const results = state.library || [];
+  if (!results.length) {
+    box.append(el("p", "muted-text", "No established results yet. A project becomes established when its whole proof " +
+      "passes the final check (the “Check whole proof” button)."));
+    return box;
+  }
+  box.append(el("p", "muted-text", "Lean checks that the result really proves this goal. Its statement must match " +
+    "(hypotheses may be filled in from the goal's own assumptions)."));
+  const list = el("div", "library");
+  results.forEach((r) => {
+    const item = el("div", "library-item");
+    const title = el("div", "math");
+    showText(title, r.latex || r.title);
+    item.append(title, el("div", "lemma-lean", `${r.theorem} ${r.statement}`));
+    item.append(button("Use it", async () => {
+      state.choosing = null;
+      addActivity(`Citing an established result for ${g.name}; Lean is checking it…`);
+      await applyWorkspace(goalAction(g.name, "use-established", { project: r.id }));
+    }, "btn tiny primary"));
+    list.append(item);
+  });
+  box.append(list);
+  return box;
+}
+
 // ---------- the side assistant ----------
 
 function showTab(name) {
@@ -645,7 +825,7 @@ function showTab(name) {
 
 async function askQuestion(text) {
   const question = (text || $("ask-input").value).trim();
-  if (!question || !state.workspaceId) return;
+  if (!question || !state.projectId) return;
   $("ask-input").value = "";
   const focusNote = state.focus === "main" ? "" : ` (I am looking at ${state.focus}.)`;
   $("conversation").append(el("div", "bubble you", question));
@@ -655,7 +835,7 @@ async function askQuestion(text) {
   answerBubble.scrollIntoView({ block: "nearest" });
   $("ask-btn").disabled = true;
   try {
-    const { answer } = await post(`/api/workspaces/${state.workspaceId}/ask`, { question: question + focusNote });
+    const { answer } = await post(`/api/projects/${state.projectId}/ask`, { question: question + focusNote });
     renderMarkdown(answerBubble, answer);
   } catch (e) {
     answerBubble.textContent = "Couldn't answer: " + e.message;
@@ -667,12 +847,12 @@ async function askQuestion(text) {
 
 async function finishProof() {
   $("finish-btn").disabled = true;
-  await attempt(post(`/api/workspaces/${state.workspaceId}/finish`));
+  await attempt(post(`/api/projects/${state.projectId}/finish`));
 }
 
 // ---------- step 4: the result ----------
 
-function showResult(r) {
+function showResult(r, scroll = true) {
   $("result-icon").className = "result-icon " + (r.proved ? "ok" : "bad");
   $("result-icon").textContent = r.proved ? "✓" : "✕";
   $("result-title").textContent = r.proved ? "Proved, and checked by Lean" : "The final check failed";
@@ -695,7 +875,8 @@ function showResult(r) {
   $("lean-code").innerHTML = highlightLean(r.lean_code || "(no proof)");
   $("saved").textContent = r.folder ? `Saved in ${r.folder}/` : "";
   setStep("proof");
-  reveal("step-result");
+  $("step-result").classList.remove("hidden");
+  if (scroll) reveal("step-result");
 }
 
 async function copyProof() {
@@ -709,9 +890,7 @@ async function copyProof() {
 }
 
 function startOver() {
-  ["step-approve", "step-workspace", "step-result"].forEach((id) => $(id).classList.add("hidden"));
-  setStep("write");
-  window.scrollTo({ top: 0, behavior: "smooth" });
+  goHome();
   $("latex").focus();
 }
 
@@ -726,7 +905,8 @@ window.addEventListener("DOMContentLoaded", () => {
   $("formalize-btn").onclick = formalize;
   $("check-btn").onclick = checkEdit;
   $("approve-btn").onclick = approve;
-  $("stop-btn").onclick = () => attempt(post(`/api/workspaces/${state.workspaceId}/stop`));
+  $("stop-btn").onclick = () => attempt(post(`/api/projects/${state.projectId}/stop`));
+  $("all-projects-btn").onclick = goHome;
   $("finish-btn").onclick = finishProof;
   $("tab-ask").onclick = () => showTab("ask");
   $("tab-activity").onclick = () => showTab("activity");
@@ -744,6 +924,9 @@ window.addEventListener("DOMContentLoaded", () => {
   } catch (e) { /* storage may be blocked */ }
   setStep("write");
   updatePreview();
+  const opened = location.hash.match(/project=([0-9a-f]+)/);
+  if (opened) openProjectById(opened[1]);
+  else loadProjects();
 });
 // KaTeX loads with `defer`, so render the preview again once it is ready.
 window.addEventListener("load", () => { updatePreview(); render(); });

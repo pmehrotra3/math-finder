@@ -141,8 +141,11 @@ def prove_lemma(
     lemma: Lemma,
     earlier: Sequence[Lemma] = (),
     on_attempt: Callable[[dict], None] | None = None,
+    background: str = "",
 ) -> Lemma:
     """Try to prove `lemma` (which may use the `earlier` lemmas). Updates and returns it.
+    `background` is Lean code placed before everything else, such as established results
+    from other projects that the earlier lemmas cite.
     `on_attempt(record)` (optional) receives one dict per proof attempt, for the trace log."""
     earlier = list(earlier)
     key = cache_key(lemma, earlier)
@@ -165,7 +168,7 @@ def prove_lemma(
         lemma.status, lemma.proof, lemma.feedback = "proved", cached, "from cache"
         return lemma
 
-    preamble = preamble_for(earlier)
+    preamble = (background + "\n\n" + preamble_for(earlier)).strip()
     hit = hammer(lemma.statement, preamble)
     if hit.proved:
         report(hit.proof, True, "", "hammer")
