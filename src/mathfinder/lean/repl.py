@@ -22,7 +22,7 @@ from mathfinder import LEAN_DIR
 HEADER = "import Mathlib\n\nset_option autoImplicit false\n\nopen BigOperators Real Nat Topology\n\n"
 DEFAULT_TIMEOUT = 300  # seconds for one check
 
-REPL_BINARY = ".lake/packages/REPL/.lake/build/bin/repl"  # built by `lake build repl` in lean_env/
+REPL_BINARY = ".lake/packages/REPL/.lake/build/bin/repl"  # built by `lake build repl` in lean/
 STARTUP_TIMEOUT = 600  # seconds to load Mathlib in a fresh REPL (cold disk cache can be slow)
 # How many REPLs may run at once. Each maps Mathlib into memory (~8 GB resident, much of it shared).
 WORKERS = int(os.environ.get("MATHFINDER_LEAN_WORKERS", "2"))

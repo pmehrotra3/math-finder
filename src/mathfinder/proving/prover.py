@@ -21,7 +21,7 @@ from mathfinder.lean.checker import FORBIDDEN, Decl, check_decls, render_theorem
 from mathfinder.proving.hammer import hammer
 from mathfinder.proving.planner import Lemma
 
-CACHE_FILE = PROJECT_ROOT / "cache" / "lemmas.json"
+CACHE_FILE = PROJECT_ROOT / "runs" / "lemma_cache.json"  # lemmas proved before, reused for free
 ATTEMPTS = 4  # proofs asked for per LLM call
 REPAIR_ROUNDS = 2  # extra rounds that see Lean's errors
 MAX_ERROR = 600  # characters of each Lean error shown to the model

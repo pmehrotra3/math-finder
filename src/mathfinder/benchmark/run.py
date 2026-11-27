@@ -1,4 +1,4 @@
-"""The benchmark: run the full search on every problem in bench/problems.jsonl.
+"""The benchmark: run the full search on every problem in problems.jsonl (next to this file).
 
 Traces and a results table go to runs/bench-<date-time>/.
 """
@@ -8,11 +8,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from mathfinder import PROJECT_ROOT
 from mathfinder.pipeline import RUNS_DIR, tracer
 from mathfinder.proving.search import SearchResult, search
 
-PROBLEMS_FILE = PROJECT_ROOT / "bench" / "problems.jsonl"
+PROBLEMS_FILE = Path(__file__).with_name("problems.jsonl")
 
 
 def load_problems() -> list[dict]:

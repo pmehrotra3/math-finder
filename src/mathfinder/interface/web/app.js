@@ -10,6 +10,7 @@ const state = {
   question: null,     // the open question from the search, if any
   paused: false,
   startedAt: 0,
+  timer: null,
   attempts: 0,
   attemptsOk: 0,
 };
@@ -31,7 +32,11 @@ function action(name, body = {}) {
   return post(`/api/sessions/${state.sessionId}/${name}`, body);
 }
 
-// ---------- math and markdown ----------
+// ---------- small helpers ----------
+
+function escapeHtml(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
 
 function renderMath(el) {
   if (window.renderMathInElement) {
@@ -45,8 +50,9 @@ function renderMath(el) {
   }
 }
 
-function escapeHtml(text) {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+function showText(el, text) {
+  el.textContent = text;
+  renderMath(el);
 }
 
 // Markdown would mangle LaTeX (it treats _ and \ specially), so we hide the math first,
@@ -63,36 +69,82 @@ function renderMarkdown(el, text) {
   renderMath(el);
 }
 
-function showText(el, text) {
-  el.textContent = text;
-  renderMath(el);
+// A light touch of Lean highlighting: keywords and comments.
+const LEAN_KEYWORDS = /\b(theorem|lemma|example|by|namespace|end|have|show|exact|intro|intros|rw|simp|calc|fun|let|obtain|rcases|cases|induction|with|at|from|use|apply|refine|constructor|omega|ring|linarith|nlinarith|norm_num|positivity|decide|mod_cases)\b/g;
+function highlightLean(code) {
+  return code
+    .split("\n")
+    .map((line) => {
+      const at = line.indexOf("--");
+      const body = at === -1 ? line : line.slice(0, at);
+      const comment = at === -1 ? "" : `<span class="cm">${escapeHtml(line.slice(at))}</span>`;
+      return escapeHtml(body).replace(LEAN_KEYWORDS, '<span class="kw">$1</span>') + comment;
+    })
+    .join("\n");
 }
 
-// ---------- step 1: LaTeX in, live preview ----------
+const STEPS = ["write", "confirm", "search", "proof"];
+function setStep(step) {
+  const now = STEPS.indexOf(step);
+  document.querySelectorAll("#stepper li").forEach((li) => {
+    const i = STEPS.indexOf(li.dataset.step);
+    li.classList.toggle("done", i < now);
+    li.classList.toggle("current", i === now);
+  });
+}
+
+function reveal(id) {
+  $(id).classList.remove("hidden");
+  $(id).scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function busy(el, text) {
+  el.innerHTML = text ? `<span class="spinner"></span><span></span>` : "";
+  if (text) el.lastChild.textContent = text;
+}
+
+// ---------- theme ----------
+
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem("mf-theme", theme); } catch (e) { /* storage may be blocked */ }
+}
+
+function toggleTheme() {
+  const dark = document.documentElement.dataset.theme
+    ? document.documentElement.dataset.theme === "dark"
+    : matchMedia("(prefers-color-scheme: dark)").matches;
+  setTheme(dark ? "light" : "dark");
+}
+
+// ---------- step 1: write the theorem ----------
 
 function updatePreview() {
-  showText($("preview"), $("latex").value);
+  const text = $("latex").value.trim();
+  if (text) showText($("preview"), text);
+  else $("preview").innerHTML = '<span class="field-label">Your theorem appears here</span>';
 }
 
 async function formalize() {
   state.latex = $("latex").value.trim();
+  if (!state.latex) return;
   $("formalize-btn").disabled = true;
-  $("formalize-status").textContent = "Translating to Lean and checking it (about 30 s)…";
+  busy($("formalize-status"), "Translating to Lean and checking it…");
   try {
     const f = await post("/api/formalize", { latex: state.latex });
     if (!f.ok) {
       $("formalize-status").textContent = "Lean couldn't accept any translation: " + (f.errors[0] || "");
       return;
     }
-    $("formalize-status").textContent = "";
+    busy($("formalize-status"), "");
     $("statement").value = f.statement;
     showText($("back"), f.back_translation);
     const v = $("verdict");
-    v.className = "verdict " + (f.faithful ? "ok" : "warn");
-    v.textContent = (f.faithful ? "✓ Same meaning: " : "⚠ The meaning may differ: ") + f.judgment;
+    v.className = "notice " + (f.faithful ? "ok" : "warn");
+    v.textContent = (f.faithful ? "✓ Same meaning. " : "⚠ The meaning may differ. ") + f.judgment;
     $("check-errors").classList.add("hidden");
-    $("step-approve").classList.remove("hidden");
-    $("step-approve").scrollIntoView({ behavior: "smooth" });
+    setStep("confirm");
+    reveal("step-approve");
   } catch (e) {
     $("formalize-status").textContent = "Error: " + e.message;
   } finally {
@@ -100,27 +152,34 @@ async function formalize() {
   }
 }
 
-// ---------- step 2: approve ----------
+// ---------- step 2: confirm ----------
 
 async function checkEdit() {
   const box = $("check-errors");
-  const { errors } = await post("/api/check", { statement: $("statement").value });
-  box.classList.toggle("hidden", errors.length === 0);
-  box.textContent = errors.length ? "Lean rejected it:\n" + errors[0] : "";
-  if (!errors.length) {
-    box.classList.remove("hidden");
-    box.textContent = "✓ Lean accepts this statement.";
+  $("check-btn").disabled = true;
+  try {
+    const { errors } = await post("/api/check", { statement: $("statement").value });
+    box.className = "notice " + (errors.length ? "bad" : "ok");
+    box.textContent = errors.length ? "Lean rejected it:\n" + errors[0] : "✓ Lean accepts this statement.";
+  } finally {
+    $("check-btn").disabled = false;
   }
-  return errors.length === 0;
 }
 
 async function approve() {
   $("approve-btn").disabled = true;
   const hints = $("start-hints").value.split("\n").map((h) => h.trim()).filter(Boolean);
-  const metric = $("metric").value;
-  const { id } = await post("/api/sessions", { statement: $("statement").value, latex: state.latex, hints, metric });
-  startWatching(id);
-  hints.forEach((h) => addMessage(`hint: ${h}`, "you"));
+  const metric = document.querySelector('input[name="metric"]:checked').value;
+  try {
+    const { id } = await post("/api/sessions", { statement: $("statement").value, latex: state.latex, hints, metric });
+    startWatching(id);
+    hints.forEach((h) => addMessage(`hint: ${h}`, "you"));
+  } catch (e) {
+    $("check-errors").className = "notice bad";
+    $("check-errors").textContent = "Error: " + e.message;
+  } finally {
+    $("approve-btn").disabled = false;
+  }
 }
 
 // ---------- step 3: the live search ----------
@@ -129,16 +188,32 @@ function startWatching(id) {
   Object.assign(state, { sessionId: id, plans: [], current: null, question: null, startedAt: Date.now(),
                          attempts: 0, attemptsOk: 0, paused: false });
   $("log").innerHTML = "";
+  $("pause-btn").textContent = "Pause";
+  $("search-statement").textContent = "theorem main " + $("statement").value;
   $("step-result").classList.add("hidden");
-  $("step-search").classList.remove("hidden");
   setStatus("running");
+  $("search-title").textContent = "Searching";
+  setStep("search");
   renderTree();
-  $("step-search").scrollIntoView({ behavior: "smooth" });
+  reveal("step-search");
+  clearInterval(state.timer);
+  state.timer = setInterval(updateStats, 1000);
 
   const protocol = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${protocol}://${location.host}/ws/${id}`);
   ws.onmessage = (message) => handleEvent(JSON.parse(message.data));
-  ws.onclose = () => addMessage("(connection closed)", "sys");
+  ws.onclose = () => clearInterval(state.timer);
+}
+
+function elapsed() {
+  const s = Math.round((Date.now() - state.startedAt) / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function updateStats() {
+  $("stat-time").textContent = elapsed();
+  $("stat-plans").textContent = state.plans.length;
+  $("stat-attempts").textContent = state.attempts;
 }
 
 function setStatus(status) {
@@ -163,19 +238,20 @@ function handleEvent(e) {
   const deep = (e.depth || 0) > 0; // events from a sub-search on a stuck lemma
   switch (e.kind) {
     case "start":
-      if (!deep) addMessage("Search started.");
+      if (!deep) addMessage("Search started. Trying automation first…");
       break;
     case "refuted":
       addMessage(`The statement is FALSE. Counterexample: ${e.counterexample}`);
       break;
     case "round":
-      if (!deep) addMessage(`Round ${e.number}: asking the planner…`);
+      if (!deep) addMessage(`Round ${e.number}: asking for proof plans…`);
       break;
     case "plan_rejected":
       if (!deep) state.plans.push({ sketch: e.sketch, status: "rejected", reason: e.reason, lemmas: [] });
       break;
     case "plan_start":
       if (deep) { addMessage(`  sub-plan: ${e.sketch}`); break; }
+      if (state.current && state.current.status === "active") state.current.status = "failed";
       state.current = { sketch: e.sketch, status: "active", reason: "",
                         lemmas: e.lemmas.map((name) => ({ name, statement: "", status: "open", feedback: "" })) };
       state.plans.push(state.current);
@@ -187,7 +263,7 @@ function handleEvent(e) {
       break;
     }
     case "subsearch_start":
-      addMessage(`${e.name} is stuck: starting a smaller search on it.`);
+      addMessage(`${e.name} is stuck: splitting it into smaller steps.`);
       break;
     case "lemma_proved":
     case "lemma_refuted":
@@ -203,6 +279,7 @@ function handleEvent(e) {
       break;
     }
     case "attempt":
+    case "optimize_candidate":
       state.attempts += 1;
       if (e.ok) state.attemptsOk += 1;
       break;
@@ -216,11 +293,11 @@ function handleEvent(e) {
         state.current = { sketch: e.plan, status: "proved", reason: "", lemmas: [] };
         state.plans.push(state.current);
       }
-      addMessage("✓ Lean verified a proof.");
+      addMessage("✓ Lean verified a proof.", "good");
       break;
     case "ask_user":
       state.question = e.question;
-      $("question").textContent = "❓ " + e.question;
+      $("question").textContent = e.question;
       $("question").classList.remove("hidden");
       $("chat-input").placeholder = "Type your answer…";
       $("chat-input").focus();
@@ -238,11 +315,7 @@ function handleEvent(e) {
       addMessage("No verified proof found.");
       break;
     case "optimize_start":
-      addMessage(`Looking for a better proof (${e.metric}, current cost ${e.cost})…`);
-      break;
-    case "optimize_candidate":
-      state.attempts += 1;
-      if (e.ok) state.attemptsOk += 1;
+      addMessage(`Looking for a better proof (current cost ${e.cost})…`);
       break;
     case "optimized":
       addMessage(e.improved ? `Found a better proof: cost ${e.before.cost} → ${e.after.cost}.`
@@ -256,41 +329,47 @@ function handleEvent(e) {
       break;
   }
   renderTree();
+  updateStats();
 }
+
+const PLAN_TAGS = { active: "Working", proved: "Proved", failed: "Failed", rejected: "Doesn't fit" };
+const DOTS = { proved: "✓", refuted: "✕", stuck: "!", working: "", open: "" };
 
 function renderTree() {
   const tree = $("tree");
   tree.innerHTML = "";
   if (!state.plans.length) {
-    tree.innerHTML = '<div class="muted">Waiting for the first plans…</div>';
+    tree.innerHTML = '<div class="empty"><span class="spinner"></span>Waiting for the first plans…</div>';
     return;
   }
   state.plans.forEach((plan) => {
     const div = document.createElement("div");
     div.className = "plan " + plan.status;
-    const sketch = document.createElement("div");
-    sketch.className = "sketch";
-    sketch.textContent = plan.sketch;
-    div.appendChild(sketch);
+    div.innerHTML = '<div class="plan-top"><span class="plan-tag"></span><div class="sketch"></div></div>';
+    div.querySelector(".plan-tag").textContent = PLAN_TAGS[plan.status] || plan.status;
+    div.querySelector(".sketch").textContent = plan.sketch;
     if (plan.reason) {
       const reason = document.createElement("div");
       reason.className = "reason";
       reason.textContent = plan.reason;
       div.appendChild(reason);
     }
-    const ul = document.createElement("ul");
-    ul.className = "lemmas";
-    plan.lemmas.forEach((l) => {
-      const li = document.createElement("li");
-      li.className = "lemma " + l.status;
-      li.innerHTML = '<span class="name"></span> <span class="stmt"></span><div class="fb"></div>';
-      li.querySelector(".name").textContent = l.name;
-      li.querySelector(".stmt").textContent = l.statement;
-      li.querySelector(".fb").textContent = l.feedback;
-      li.onclick = (event) => openLemmaMenu(event, l, plan);
-      ul.appendChild(li);
-    });
-    div.appendChild(ul);
+    if (plan.lemmas.length) {
+      const ul = document.createElement("ul");
+      ul.className = "lemmas";
+      plan.lemmas.forEach((l) => {
+        const li = document.createElement("li");
+        li.className = "lemma " + l.status;
+        li.innerHTML = '<span class="dot"></span><span class="name"></span><span class="stmt"></span><span class="fb"></span>';
+        li.querySelector(".dot").textContent = DOTS[l.status] ?? "";
+        li.querySelector(".name").textContent = l.name;
+        li.querySelector(".stmt").textContent = l.statement;
+        li.querySelector(".fb").textContent = l.feedback;
+        li.onclick = (event) => openLemmaMenu(event, l, plan);
+        ul.appendChild(li);
+      });
+      div.appendChild(ul);
+    }
     tree.appendChild(div);
   });
 }
@@ -304,8 +383,8 @@ function openLemmaMenu(event, lemma, plan) {
       $("chat-input").value = `For ${lemma.name} (${lemma.statement}): `;
       $("chat-input").focus();
     }],
-    ["Reject: false or useless", () => send("reject", { name: lemma.name }, `reject ${lemma.name}`)],
-    ["Pin this plan's approach", () => send("pin", { text: plan.sketch }, `pin: ${plan.sketch}`)],
+    ["Reject it: false or useless", () => send("reject", { name: lemma.name }, `reject ${lemma.name}`)],
+    ["Keep this plan's approach", () => send("pin", { text: plan.sketch }, `pin: ${plan.sketch}`)],
   ];
   choices.forEach(([label, onClick]) => {
     const b = document.createElement("button");
@@ -313,7 +392,7 @@ function openLemmaMenu(event, lemma, plan) {
     b.onclick = () => { menu.classList.add("hidden"); onClick(); };
     menu.appendChild(b);
   });
-  menu.style.left = `${event.pageX}px`;
+  menu.style.left = `${Math.min(event.pageX, window.innerWidth - 250)}px`;
   menu.style.top = `${event.pageY}px`;
   menu.classList.remove("hidden");
 }
@@ -334,7 +413,7 @@ async function sendChat() {
   if (state.question) { // an open question: this is the answer
     state.question = null;
     $("question").classList.add("hidden");
-    $("chat-input").placeholder = "Type a hint, e.g. try induction on n";
+    $("chat-input").placeholder = "Give a hint, e.g. try induction on n";
     await send("answer", { text }, `answer: ${text}`);
   } else {
     await send("hint", { text }, `hint: ${text}`);
@@ -359,22 +438,24 @@ async function togglePause() {
 // ---------- step 4: the result ----------
 
 function showResult(e) {
+  clearInterval(state.timer);
   setStatus(e.status);
+  $("search-title").textContent = "Search";
   const r = e.result || {};
-  $("result-title").textContent = r.proved ? "Proved, and verified by Lean" : "Not proved";
-  const seconds = Math.round((Date.now() - state.startedAt) / 1000);
-  const lemmas = state.current && r.proved ? state.current.lemmas.length : 0;
+  $("result-icon").className = "result-icon " + (r.proved ? "ok" : "bad");
+  $("result-icon").textContent = r.proved ? "✓" : "✕";
+  $("result-title").textContent = r.proved ? "Proved, and checked by Lean" : "No proof found";
+  $("result-sub").textContent = r.proved ? $("search-statement").textContent : (r.message || "");
+  // count the lemmas in the final proof (the optimizer may have removed some)
+  const lemmas = r.proved ? Math.max(0, (r.lean_code.match(/^theorem /gm) || []).length - 1) : 0;
   const metrics = [
-    [`${seconds} s`, "time"],
+    [elapsed(), "time"],
     [String(r.rounds ?? 0), "planning rounds"],
     [String(state.plans.length), "plans considered"],
-    [String(lemmas), "lemmas in the proof"],
-    [`${state.attemptsOk}/${state.attempts}`, "proof attempts that worked"],
+    [String(lemmas), "lemmas used"],
+    [`${state.attemptsOk}/${state.attempts}`, "attempts that worked"],
   ];
-  if (r.optimization) {
-    const o = r.optimization;
-    metrics.push([`${o.before.cost} → ${o.after.cost}`, `proof cost (${o.metric})`]);
-  }
+  if (r.optimization) metrics.push([`${r.optimization.before.cost} → ${r.optimization.after.cost}`, "proof cost"]);
   $("metrics").innerHTML = "";
   metrics.forEach(([v, k]) => {
     const div = document.createElement("div");
@@ -386,16 +467,37 @@ function showResult(e) {
   });
   if (r.explanation) renderMarkdown($("explanation"), r.explanation);
   else $("explanation").textContent = r.message || "";
-  $("lean-code").textContent = r.lean_code || "(no proof)";
-  $("saved").textContent = r.folder ? `Saved in ${r.folder}` : "";
-  $("step-result").classList.remove("hidden");
-  $("step-result").scrollIntoView({ behavior: "smooth" });
+  $("lean-code").innerHTML = highlightLean(r.lean_code || "(no proof)");
+  $("saved").textContent = r.folder ? `Saved in ${r.folder}/` : "";
+  setStep("proof");
+  reveal("step-result");
+}
+
+async function copyProof() {
+  try {
+    await navigator.clipboard.writeText($("lean-code").textContent);
+    $("copy-btn").textContent = "Copied";
+  } catch (e) {
+    $("copy-btn").textContent = "Select and copy";
+  }
+  setTimeout(() => { $("copy-btn").textContent = "Copy"; }, 1500);
+}
+
+function startOver() {
+  ["step-approve", "step-search", "step-result"].forEach((id) => $(id).classList.add("hidden"));
+  setStep("write");
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  $("latex").focus();
 }
 
 // ---------- wire up the buttons ----------
 
 window.addEventListener("DOMContentLoaded", () => {
   $("latex").addEventListener("input", updatePreview);
+  $("latex").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) formalize(); });
+  document.querySelectorAll("#examples .chip").forEach((chip) => {
+    chip.onclick = () => { $("latex").value = chip.dataset.latex; updatePreview(); };
+  });
   $("formalize-btn").onclick = formalize;
   $("check-btn").onclick = checkEdit;
   $("approve-btn").onclick = approve;
@@ -404,6 +506,16 @@ window.addEventListener("DOMContentLoaded", () => {
   $("lemma-btn").onclick = suggestLemma;
   $("pause-btn").onclick = togglePause;
   $("stop-btn").onclick = () => send("stop", {}, "stop");
+  $("copy-btn").onclick = copyProof;
+  $("again-btn").onclick = startOver;
+  $("theme-btn").onclick = toggleTheme;
   document.addEventListener("click", () => $("lemma-menu").classList.add("hidden"));
+  try {
+    const saved = localStorage.getItem("mf-theme");
+    if (saved) document.documentElement.dataset.theme = saved;
+  } catch (e) { /* storage may be blocked */ }
+  setStep("write");
   updatePreview();
 });
+// KaTeX loads with `defer`, so render the preview again once it is ready.
+window.addEventListener("load", updatePreview);

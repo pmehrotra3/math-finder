@@ -5,6 +5,8 @@
 
 **You write a theorem. Math Finder finds a proof, and Lean checks that it is correct.**
 
+![Math Finder proving that 6 divides n³ − n](.github/screenshot.png)
+
 AI models can write convincing proofs that are wrong. Lean is a program that checks a proof step by step and rejects
 any mistake. Math Finder combines them: the AI (Claude) has the ideas, and a proof counts only once Lean accepts it.
 
@@ -66,12 +68,12 @@ src/mathfinder/
 │   ├── cli.py             command line
 │   ├── server.py          web server
 │   └── web/               web page
-├── llm.py               talks to Claude
-└── benchmark.py         measures how many problems it solves
+├── benchmark/           the test problems, and how many it solves
+└── llm.py               talks to Claude
 
-lean_env/                pinned versions of Lean, Mathlib and the REPL
-bench/                   benchmark problems and results
+lean/                    pinned versions of Lean, Mathlib and the REPL
 tests/                   tests
+runs/                    your results (created when you run it; not in git)
 ```
 
 ## Setup
@@ -82,7 +84,7 @@ and 16 GB of RAM or more (recommended).
 ```bash
 git clone https://github.com/pmehrotra3/math-finder && cd math-finder
 uv sync
-cd lean_env && lake exe cache get && lake build repl && cd ..
+cd lean && lake exe cache get && lake build repl && cd ..
 ```
 
 The model is Claude, through the [`claude` CLI](https://claude.com/claude-code) by default.
@@ -98,7 +100,7 @@ The model is Claude, through the [`claude` CLI](https://claude.com/claude-code) 
 ## Usage
 
 ```bash
-uv run mathfinder serve                                               # web page at http://localhost:8000
+uv run mathfinder serve                                               # the web page, at http://localhost:8000
 uv run mathfinder prove 'For every integer $n$, $6 \mid n^3 - n$.'    # a theorem in LaTeX
 uv run mathfinder prove --lean "(n : ℕ) : n + 0 = n"                  # a Lean statement
 uv run mathfinder bench                                               # the benchmark
@@ -109,8 +111,8 @@ Each run is saved in `runs/` with a full trace. A proved theorem also gets its L
 
 ## Results
 
-20 of 20 proved on a [self-written set](bench/problems.jsonl) of competition-style problems, 8 of them by automation
-alone ([per-problem results](bench/results.md), recorded before the REPL speedup). The set is small and fairly easy:
+20 of 20 proved on a [self-written set](src/mathfinder/benchmark/problems.jsonl) of competition-style problems, 8 of them by automation
+alone ([per-problem results](src/mathfinder/benchmark/results.md), recorded before the REPL speedup). The set is small and fairly easy:
 it is a regression test, not a miniF2F score.
 
 Lean stays running with Mathlib loaded instead of restarting for each check. On one five-proof file that cut a check

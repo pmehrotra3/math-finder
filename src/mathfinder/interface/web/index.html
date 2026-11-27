@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Math Finder</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%235b5bd6'/><rect x='10' y='10' width='12' height='12' fill='white'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
@@ -12,90 +15,158 @@
 <script defer src="app.js"></script>
 </head>
 <body>
-<header>
-  <h1>Math Finder</h1>
-  <p>Write a theorem. Approve its Lean form. Work with the search until Lean verifies a proof.</p>
+<header class="topbar">
+  <a class="brand" href="/">
+    <span class="mark" aria-hidden="true"></span>
+    <span><strong>Math Finder</strong><small>Proofs checked by Lean</small></span>
+  </a>
+  <ol class="stepper" id="stepper">
+    <li data-step="write"><span>1</span>Write</li>
+    <li data-step="confirm"><span>2</span>Confirm</li>
+    <li data-step="search"><span>3</span>Search</li>
+    <li data-step="proof"><span>4</span>Proof</li>
+  </ol>
+  <button id="theme-btn" class="icon-btn" title="Switch light / dark" aria-label="Switch light or dark theme"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
 </header>
 
 <main>
-  <!-- 1. the theorem -->
-  <section id="step-input" class="card">
-    <h2><span class="num">1</span> Your theorem, in LaTeX</h2>
-    <textarea id="latex" rows="3" spellcheck="false">For all positive reals $a, b$: $\frac{a}{b} + \frac{b}{a} \ge 2$.</textarea>
-    <div class="label">Preview</div>
-    <div id="preview" class="preview"></div>
-    <div class="label">Hints for the search (optional, one per line)</div>
-    <textarea id="start-hints" rows="2" spellcheck="false" placeholder="e.g. write it as a square over a*b"></textarea>
-    <div class="label">After the first proof, look for a better one that is</div>
-    <select id="metric">
-      <option value="short">short (fewest lines)</option>
-      <option value="readable">readable (explicit steps, little black-box automation)</option>
-      <option value="few_lemmas">self-contained (no separate lemmas)</option>
-    </select>
-    <div class="row">
-      <button id="formalize-btn" class="primary">Formalize</button>
-      <span id="formalize-status" class="muted"></span>
+  <!-- 1. write the theorem -->
+  <section id="step-input" class="panel hero">
+    <h1>What do you want to prove?</h1>
+    <p class="lead">Write a theorem in LaTeX. Math Finder turns it into Lean, searches for a proof,
+      and Lean checks every step before you see it.</p>
+
+    <div class="examples" id="examples">
+      <span class="examples-label">Try</span>
+      <button class="chip" data-latex="For every integer $n$, $6 \mid n^3 - n$.">6 ∣ n³ − n</button>
+      <button class="chip" data-latex="For all positive reals $a, b$: $\frac{a}{b} + \frac{b}{a} \ge 2$.">a/b + b/a ≥ 2</button>
+      <button class="chip" data-latex="The sum of the first $n$ odd numbers is $n^2$.">Sum of odd numbers</button>
+      <button class="chip" data-latex="For all real numbers $a, b$: $a^2 + b^2 \ge 2ab$.">a² + b² ≥ 2ab</button>
+    </div>
+
+    <div class="composer">
+      <label class="field">
+        <span class="field-label">LaTeX</span>
+        <textarea id="latex" rows="4" spellcheck="false">For every integer $n$, $6 \mid n^3 - n$.</textarea>
+      </label>
+      <div class="field">
+        <span class="field-label">Preview</span>
+        <div id="preview" class="preview math"></div>
+      </div>
+    </div>
+
+    <details class="options">
+      <summary>Options</summary>
+      <label class="field">
+        <span class="field-label">Hints for the search (optional, one per line)</span>
+        <textarea id="start-hints" rows="2" spellcheck="false" placeholder="e.g. look at remainders mod 6"></textarea>
+      </label>
+      <div class="field">
+        <span class="field-label">After the first proof, look for one that is</span>
+        <div class="segmented" id="metric">
+          <label><input type="radio" name="metric" value="short" checked><span>Shortest</span></label>
+          <label><input type="radio" name="metric" value="readable"><span>Most readable</span></label>
+          <label><input type="radio" name="metric" value="few_lemmas"><span>Self-contained</span></label>
+        </div>
+      </div>
+    </details>
+
+    <div class="actions">
+      <span id="formalize-status" class="status-text"></span>
+      <button id="formalize-btn" class="btn primary">Translate to Lean <span aria-hidden="true">→</span></button>
     </div>
   </section>
 
-  <!-- 2. approve the formal statement -->
-  <section id="step-approve" class="card hidden">
-    <h2><span class="num">2</span> Is this what you mean?</h2>
-    <div class="label">Lean statement (you can edit it)</div>
-    <div class="lean-line"><code>theorem main</code><input id="statement" spellcheck="false"></div>
-    <div id="check-errors" class="error hidden"></div>
-    <div class="label">Read back from the Lean, without seeing your text</div>
-    <div id="back" class="preview"></div>
-    <div id="verdict" class="verdict"></div>
-    <div class="row">
-      <button id="check-btn">Check my edit</button>
-      <button id="approve-btn" class="primary">Approve &amp; search</button>
+  <!-- 2. confirm the Lean statement -->
+  <section id="step-approve" class="panel hidden">
+    <div class="panel-head">
+      <h2>Is this what you mean?</h2>
+      <p class="lead">Lean will prove exactly this statement, so check it carefully. You can edit it.</p>
+    </div>
+    <div class="code-input">
+      <span class="kw">theorem</span><span class="name">main</span>
+      <input id="statement" spellcheck="false" aria-label="Lean statement">
+    </div>
+    <div id="check-errors" class="notice hidden"></div>
+    <div class="readback">
+      <span class="field-label">Read back from the Lean (written without seeing your text)</span>
+      <div id="back" class="math"></div>
+    </div>
+    <div id="verdict" class="notice"></div>
+    <div class="actions">
+      <button id="check-btn" class="btn">Check my edit</button>
+      <button id="approve-btn" class="btn primary">Approve and prove <span aria-hidden="true">→</span></button>
     </div>
   </section>
 
-  <!-- 3. the search, live -->
-  <section id="step-search" class="card hidden">
-    <h2><span class="num">3</span> Searching <span id="search-status" class="badge">running</span></h2>
+  <!-- 3. the live search -->
+  <section id="step-search" class="panel hidden">
+    <div class="panel-head row-between">
+      <div>
+        <h2><span id="search-title">Searching</span> <span id="search-status" class="badge">running</span></h2>
+        <p class="lead mono" id="search-statement"></p>
+      </div>
+      <div class="stats">
+        <div><b id="stat-time">0:00</b><span>elapsed</span></div>
+        <div><b id="stat-plans">0</b><span>plans</span></div>
+        <div><b id="stat-attempts">0</b><span>attempts</span></div>
+      </div>
+    </div>
     <div class="search-layout">
       <div>
-        <div class="label">Plans and lemmas (click a lemma for options)</div>
+        <span class="field-label">Plans and lemmas <em>· click a lemma for options</em></span>
         <div id="tree" class="tree"></div>
       </div>
-      <div class="chat">
-        <div class="label">Work together</div>
+      <aside class="chat">
+        <span class="field-label">Work together</span>
         <div id="question" class="question hidden"></div>
         <div id="log" class="log"></div>
-        <div class="row">
-          <input id="chat-input" placeholder="Type a hint, e.g. try induction on n" spellcheck="false">
-          <button id="send-btn" class="primary">Send</button>
+        <div class="chat-input">
+          <input id="chat-input" placeholder="Give a hint, e.g. try induction on n" spellcheck="false">
+          <button id="send-btn" class="btn primary">Send</button>
         </div>
-        <details>
+        <details class="options compact">
           <summary>Suggest a lemma</summary>
-          <div class="row">
-            <input id="lemma-name" placeholder="name, e.g. key" spellcheck="false">
+          <div class="chat-input">
+            <input id="lemma-name" placeholder="name" spellcheck="false" class="narrow">
             <input id="lemma-statement" placeholder="(a b : ℝ) : 0 ≤ (a - b) ^ 2" spellcheck="false">
-            <button id="lemma-btn">Suggest</button>
+            <button id="lemma-btn" class="btn">Add</button>
           </div>
         </details>
-        <div class="row">
-          <button id="pause-btn">Pause</button>
-          <button id="stop-btn" class="danger">Stop</button>
+        <div class="controls">
+          <button id="pause-btn" class="btn">Pause</button>
+          <button id="stop-btn" class="btn danger">Stop</button>
         </div>
-      </div>
+      </aside>
     </div>
   </section>
 
   <!-- 4. the result -->
-  <section id="step-result" class="card hidden">
-    <h2><span class="num">4</span> <span id="result-title">Result</span></h2>
+  <section id="step-result" class="panel hidden">
+    <div class="result-head">
+      <span id="result-icon" class="result-icon"></span>
+      <div>
+        <h2 id="result-title">Result</h2>
+        <p class="lead" id="result-sub"></p>
+      </div>
+      <button id="again-btn" class="btn">Prove another</button>
+    </div>
     <div id="metrics" class="metrics"></div>
-    <div id="explanation" class="explanation"></div>
-    <div class="label">The Lean proof, verified by Lean</div>
-    <pre id="lean-code"></pre>
-    <p id="saved" class="muted"></p>
+    <div class="result-grid">
+      <article id="explanation" class="explanation math"></article>
+      <div class="proof">
+        <div class="proof-head">
+          <span class="field-label">Lean proof</span>
+          <button id="copy-btn" class="btn small">Copy</button>
+        </div>
+        <pre><code id="lean-code"></code></pre>
+        <p id="saved" class="saved"></p>
+      </div>
+    </div>
   </section>
 </main>
 
+<footer class="footer">Running on this computer · Every proof is checked by Lean 4 and Mathlib</footer>
 <div id="lemma-menu" class="menu hidden"></div>
 </body>
 </html>

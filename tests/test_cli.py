@@ -2,7 +2,8 @@
 
 import pytest
 
-from mathfinder import benchmark, pipeline
+from mathfinder import pipeline
+from mathfinder.benchmark import run as benchmark
 from mathfinder.interface import cli
 from mathfinder.lean.checker import Decl, check_decls
 from mathfinder.proving.planner import Lemma, Plan

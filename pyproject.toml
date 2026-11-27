@@ -33,6 +33,7 @@ build-backend = "hatchling.build"
 packages = ["src/mathfinder"]
 
 [tool.pytest.ini_options]
+cache_dir = ".venv/pytest-cache"
 testpaths = ["tests"]
 markers = [
     "llm: calls a real LLM (slow, uses quota). Run with: pytest -m llm",
@@ -41,6 +42,7 @@ markers = [
 addopts = "-m 'not llm'"
 
 [tool.ruff]
+cache-dir = ".venv/ruff-cache"  # keep tool caches out of the project folder
 line-length = 120
 
 [tool.ruff.lint]

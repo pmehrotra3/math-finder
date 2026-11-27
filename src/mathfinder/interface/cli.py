@@ -14,7 +14,7 @@ from collections.abc import Callable
 
 import uvicorn
 
-from mathfinder.benchmark import load_problems, run_bench
+from mathfinder.benchmark.run import load_problems, run_bench
 from mathfinder.lean.checker import statement_errors
 from mathfinder.pipeline import prove
 from mathfinder.proving.optimize import METRICS
@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     prove_cmd.add_argument("--no-explain", action="store_true", help="skip the plain-math explanation")
     prove_cmd.add_argument("--metric", choices=sorted(METRICS), default="short", help="what 'better proof' means")
     prove_cmd.add_argument("--no-optimize", action="store_true", help="keep the first proof found")
-    bench_cmd = commands.add_parser("bench", help="run the benchmark in bench/problems.jsonl")
+    bench_cmd = commands.add_parser("bench", help="run the benchmark in the benchmark problems")
     bench_cmd.add_argument("--rounds", type=int, default=2, help="planning rounds per problem")
     bench_cmd.add_argument("--only", nargs="*", default=[], help="names of problems to run (default: all)")
     serve_cmd = commands.add_parser("serve", help="start the web page (on this computer only)")
