@@ -99,7 +99,12 @@ def prove(
             outcome["explanation"] = f"(could not write an explanation: {e})"
 
     # 4. Save everything.
-    (folder / "theorem.txt").write_text(theorem + "\n")
-    (folder / "proof.lean").write_text(HEADER + outcome["lean_code"])  # Lean can check this file on its own
-    (folder / "explanation.md").write_text(outcome["explanation"] + "\n")
+    save_proof(folder, theorem, outcome["lean_code"], outcome["explanation"])
     return outcome
+
+
+def save_proof(folder: Path, theorem: str, lean_code: str, explanation: str) -> None:
+    """Write a proved theorem into its run folder."""
+    (folder / "theorem.txt").write_text(theorem + "\n")
+    (folder / "proof.lean").write_text(HEADER + lean_code)  # Lean can check this file on its own
+    (folder / "explanation.md").write_text(explanation + "\n")

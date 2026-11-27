@@ -10,39 +10,46 @@
 AI models can write convincing proofs that are wrong. Lean is a program that checks a proof step by step and rejects
 any mistake. Math Finder combines them: the AI (Claude) has the ideas, and a proof counts only once Lean accepts it.
 
-## An example
+## Working with it
 
-You type: *For every integer n, 6 divides n³ − n.*
+Math Finder works like a proof assistant sitting next to you.
 
-| Step | What happened in a real run |
-|---|---|
-| 1. Translate | Claude writes it in Lean: `(n : ℤ) : 6 ∣ n ^ 3 - n`. You confirm that is what you meant. |
-| 2. Plan | Claude suggests working with remainders modulo 6, and splits the proof into three small lemmas. |
-| 3. Prove | Lean's automation proves the first lemma. Claude proves the other two. |
-| 4. Check | Lean checks the complete proof. |
-| 5. Improve | Claude tries shorter proofs. Lean accepts one with no helper lemmas. |
-| 6. Explain | You get the Lean proof and an explanation in ordinary mathematics. |
+1. **Write** the theorem in LaTeX, for example *for every integer n, 6 divides n³ − n*.
+2. **Confirm** the Lean version. It is translated back into LaTeX without seeing your text, so you can check
+   that it says what you meant.
+3. **Plan and prove** in the workspace:
+   - **Plan.** Ask for plans, or write your own. A plan is an idea, a list of lemmas, and a short Lean proof
+     that combines them. Lean checks that the lemmas really imply the goal before anything is proved.
+   - **Lean first, then LaTeX.** Every lemma is written in Lean, and its formal LaTeX is generated from that Lean,
+     so the two always say the same thing. Edit any lemma, add or remove lemmas, or change the idea.
+   - **Zoom in and out.** Open a lemma to give it a plan of its own, see every proof attempt with Lean's errors,
+     or prove it on its own. The outline and the breadcrumb take you back out.
+   - **Prove, search, or assume.** Prove a goal (its lemmas first), let the automatic search handle it, or
+     assume a lemma for now and come back to it later.
+   - **Ask on the side.** A side assistant answers questions about the proof at any time, without stopping or
+     changing anything.
+4. **Check and explain.** When the theorem is proved with nothing assumed, the whole tree goes through Lean's
+   final check (no gaps, only standard axioms) and you get an explanation in ordinary mathematics.
 
-## How it works
+The command line (`mathfinder prove`) runs the same steps automatically, without the workspace.
+
+## How the automatic search works
 
 ```mermaid
 flowchart LR
-    A[Your theorem] --> B[Translate to Lean]
-    B --> C[You approve]
-    C --> D[Plan small lemmas]
-    D --> E[Prove each lemma]
-    E -->|all proved| F[Final Lean check]
-    F --> G[Improve and explain]
-    E -->|Lean error| E
-    E -->|plan fails| D
+    A[Goal] --> B[Automation]
+    B -->|not enough| C[Plan small lemmas]
+    C --> D[Prove each lemma]
+    D -->|Lean error| D
+    D -->|stuck| E[Split into smaller lemmas]
+    E --> D
+    D -->|plan fails| C
+    D -->|all proved| F[Final Lean check]
+    B -->|proved| F
 ```
 
-- **Translate:** the Lean version is translated back without seeing your original, then the two are compared.
-- **Plan:** before proving any lemma, Lean checks that the lemmas together really imply the theorem.
-- **Prove:** automatic tactics and a search for counterexamples come first. Claude is asked only if they fail, and it
-  sees Lean's errors when it tries again. A lemma that stays stuck is split into smaller ones.
-- **Check:** the final proof may contain no errors, no gaps (`sorry`), and only Lean's three standard axioms.
-- **Work together:** in the web page you can give hints, suggest or reject lemmas, and answer its questions.
+Automatic tactics and a search for counterexamples come first. Claude is asked only when they fail, and it sees
+Lean's errors when it tries again.
 
 ## Find your way around the code
 
@@ -50,17 +57,18 @@ Start with `pipeline.py`, then follow a theorem through `translation/`, `proving
 
 ```
 src/mathfinder/
-├── pipeline.py          START HERE: one complete run, step by step
+├── pipeline.py          START HERE: one complete automatic run, step by step
 ├── translation/         between people and Lean
 │   ├── formalize.py       LaTeX → Lean statement
 │   └── explain.py         Lean proof → explanation
 ├── proving/             finding the proof
-│   ├── search.py          the main loop: plan, prove, check, try again
+│   ├── workspace.py       the tree of goals you plan and prove together
+│   ├── search.py          the automatic loop: plan, prove, check, try again
 │   ├── planner.py         asks Claude for plans made of small lemmas
 │   ├── prover.py          proves one lemma, repairing failed attempts
 │   ├── hammer.py          automatic tactics and counterexamples, no AI
 │   ├── optimize.py        looks for a better proof
-│   └── session.py         your hints and answers during a search
+│   └── session.py         lets you stop a running search
 ├── lean/                checking the proof
 │   ├── repl.py            keeps Lean running and sends it code
 │   └── checker.py         the questions we ask Lean, and the final check
@@ -69,6 +77,7 @@ src/mathfinder/
 │   ├── server.py          web server
 │   └── web/               web page
 ├── benchmark/           the test problems, and how many it solves
+├── assistant.py         the side assistant that answers your questions
 └── llm.py               talks to Claude
 
 lean/                    pinned versions of Lean, Mathlib and the REPL

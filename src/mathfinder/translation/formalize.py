@@ -86,10 +86,15 @@ def formalize(latex: str) -> Formalization:
     if result.errors:
         return result
 
-    back = llm.complete_json(SYSTEM_BACK, f"theorem main {result.statement}")
-    result.back_translation = str(back.get("latex", ""))
+    result.back_translation = to_latex("main", result.statement)
     result.faithful, result.judgment = judge(latex, result.back_translation)
     return result
+
+
+def to_latex(name: str, statement: str) -> str:
+    """Lean → formal LaTeX, literally (the model never sees what the author meant)."""
+    answer = llm.complete_json(SYSTEM_BACK, f"theorem {name} {statement}")
+    return str(answer.get("latex", "")) if isinstance(answer, dict) else ""
 
 
 def judge(original: str, back_translation: str) -> tuple[bool, str]:

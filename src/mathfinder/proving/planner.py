@@ -23,6 +23,7 @@ class Lemma:
     status: str = "open"  # open | proved | refuted | stuck
     proof: str = ""  # tactic proof, once found
     feedback: str = ""  # why it failed (Lean error, counterexample, ...)
+    latex: str = ""  # the statement in formal LaTeX
 
 
 @dataclass
@@ -45,6 +46,8 @@ Rules:
 - A lemma may use earlier lemmas in the list.
 - "main_proof" is a tactic proof of the theorem (no `by`), and uses the lemmas by name.
   Example: "nlinarith [sq_sub_nonneg a b]".
+- "latex" is the same lemma as a formal LaTeX statement, saying exactly what the Lean says
+  (number types and every hypothesis). Example: "For all $a, b \\in \\mathbb{R}$, $0 \\le (a - b)^2$."
 - Lemma names: snake_case, letters/digits/underscores only.
 - If the theorem is easy, a plan may have zero lemmas.
 - Never use sorry, admit or axiom.
@@ -52,7 +55,7 @@ Rules:
 - If the user gave hints, follow them: they come from a person working with you.
 
 Reply with ONLY a JSON object inside a ```json block:
-{"plans": [{"sketch": "...", "lemmas": [{"name": "...", "statement": "...", "informal": "..."}],
+{"plans": [{"sketch": "...", "lemmas": [{"name": "...", "statement": "...", "latex": "...", "informal": "..."}],
             "main_proof": "..."}]}"""
 
 
@@ -71,7 +74,12 @@ def parse_plans(data: object) -> list[Plan]:
     for raw in data.get("plans", []) if isinstance(data, dict) else []:
         try:
             lemmas = [
-                Lemma(name=lem["name"].strip(), statement=lem["statement"].strip(), informal=lem.get("informal", ""))
+                Lemma(
+                    name=lem["name"].strip(),
+                    statement=lem["statement"].strip(),
+                    informal=lem.get("informal", ""),
+                    latex=lem.get("latex", ""),
+                )
                 for lem in raw.get("lemmas", [])
             ]
             plan = Plan(sketch=raw.get("sketch", ""), lemmas=lemmas, main_proof=raw["main_proof"].strip())

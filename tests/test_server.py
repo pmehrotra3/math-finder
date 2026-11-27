@@ -1,11 +1,12 @@
 """Tests for pipeline.py and interface/server.py. Lean and the model are faked."""
 
 import json
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
-from mathfinder import pipeline
+from mathfinder import assistant, pipeline
 from mathfinder.interface import server
 from mathfinder.llm import LLMError
 from mathfinder.proving.optimize import Optimization
@@ -26,24 +27,13 @@ def fake_optimize(statement, code, plan, metric, on_event):
 
 
 @pytest.fixture
-def client(monkeypatch):
+def client(monkeypatch, fake):
     monkeypatch.setattr(pipeline, "search", fake_search)
     monkeypatch.setattr(pipeline, "optimize", fake_optimize)
     monkeypatch.setattr(pipeline, "explain", lambda theorem, plan, code: f"explained {plan.sketch}: {code}")
-    server.RUNS.clear()
+    monkeypatch.setattr(server, "explain", lambda theorem, plan, code: "## Proof\nexplained")
+    server.WORKSPACES.clear()
     return TestClient(server.app)
-
-
-def start(client, **body):
-    return client.post("/api/sessions", json={"statement": "t", **body})
-
-
-def watch(client, run_id):
-    with client.websocket_connect(f"/ws/{run_id}") as ws:
-        events = []
-        while not events or events[-1]["kind"] != "finished":
-            events.append(ws.receive_json())
-    return events
 
 
 # ---------- pipeline ----------
@@ -81,6 +71,22 @@ def test_run_folders_never_collide():
 # ---------- server ----------
 
 
+def new_workspace(client):
+    return client.post("/api/workspaces", json={"statement": ": T", "latex": "$T$"}).json()["id"]
+
+
+def act(client, ws_id, goal, action, **body):
+    return client.post(f"/api/workspaces/{ws_id}/goals/{goal}/{action}", json=body)
+
+
+def wait_until_idle(client, ws_id):
+    for _ in range(200):
+        if not server.WORKSPACES[ws_id].workspace.busy:
+            return
+        time.sleep(0.01)
+    raise AssertionError("the background job never finished")
+
+
 def test_formalize_endpoint(client, monkeypatch):
     f = Formalization("x", "(n : ℕ) : n = n", "For all n, n = n.", True, "same")
     monkeypatch.setattr(server.formalizer, "formalize", lambda latex: f)
@@ -88,51 +94,87 @@ def test_formalize_endpoint(client, monkeypatch):
     assert data["statement"] == "(n : ℕ) : n = n" and data["ok"] and data["faithful"]
 
 
-def test_a_search_streams_its_events_and_ends_with_the_result(client):
-    run_id = start(client).json()["id"]
-    events = watch(client, run_id)
-    assert [e["kind"] for e in events] == ["start", "done", "explaining", "finished"]
-    assert events[-1]["status"] == "proved" and events[-1]["result"]["lean_code"] == "SHORT"
-    assert watch(client, run_id) == events  # a late visitor gets the full history
+def test_plan_prove_and_finish_through_the_api(client):
+    ws_id = new_workspace(client)
+    lemmas = [{"name": "good_a", "lean": ": A"}, {"name": "good_b", "lean": ": B"}]
+    answer = act(client, ws_id, "main", "plan", sketch="two steps", main_proof="exact ⟨good_a, good_b⟩", lemmas=lemmas)
+    assert answer.json()["problems"] == []
+    assert answer.json()["workspace"]["goals"]["good_a"]["latex"] == "$: A$"
+
+    with client.websocket_connect(f"/ws/{ws_id}") as ws:
+        assert ws.receive_json()["kind"] == "snapshot"
+        assert act(client, ws_id, "main", "prove").json() == {"started": True}
+        events = []
+        while not events or events[-1]["kind"] != "idle":
+            events.append(ws.receive_json())
+        assert events[-1]["workspace"]["goals"]["main"]["status"] == "proved"
+        assert any(e["kind"] == "attempt" and e["name"] == "good_b" for e in events)
+
+        client.post(f"/api/workspaces/{ws_id}/finish")
+        while events[-1]["kind"] != "finished":
+            events.append(ws.receive_json())
+    result = events[-1]["result"]
+    assert result["proved"] and result["explanation"] == "## Proof\nexplained"
+    saved = pipeline.RUNS_DIR / result["folder"].removeprefix("runs/")
+    assert (saved / "proof.lean").read_text().endswith(result["lean_code"])
+    assert "theorem good_b" in result["lean_code"]
 
 
-def test_actions_reach_the_session_while_it_waits_for_an_answer(client, monkeypatch):
-    def search_that_asks(statement, hints, rounds, on_event, session):
-        on_event({"kind": "ask_user", "question": "Any idea?"})
-        on_event({"kind": "user_answer", "text": session.ask("Any idea?")})
-        return SearchResult(False, message=f"hints were {session.hints()}")
-
-    monkeypatch.setattr(pipeline, "search", search_that_asks)
-    run_id = start(client, hints=["start hint"]).json()["id"]
-    assert client.post(f"/api/sessions/{run_id}/hint", json={"text": "try cases"}).json() == {"ok": True}
-    with client.websocket_connect(f"/ws/{run_id}") as ws:
-        assert ws.receive_json()["kind"] == "ask_user"
-        client.post(f"/api/sessions/{run_id}/answer", json={"text": "use induction"})
-        assert ws.receive_json()["text"] == "use induction"
-        final = ws.receive_json()
-    assert final["status"] == "not_proved"
-    assert final["result"]["message"] == "hints were ['start hint', 'try cases']"
+def test_assume_then_edit_a_statement(client):
+    ws_id = new_workspace(client)
+    act(client, ws_id, "main", "plan", sketch="", main_proof="simp", lemmas=[{"name": "good_a", "lean": ": A"}])
+    goals = act(client, ws_id, "good_a", "assume", on=True).json()["workspace"]["goals"]
+    assert goals["good_a"]["status"] == "assumed"
+    assert act(client, ws_id, "good_a", "statement", lean=": nope").json()["errors"] == ["unknown identifier"]
+    edited = act(client, ws_id, "good_a", "statement", lean=": A2").json()["workspace"]["goals"]["good_a"]
+    assert (edited["lean"], edited["latex"], edited["status"]) == (": A2", "$: A2$", "open")
 
 
-def test_stopped_and_crashed_searches_still_finish(client, monkeypatch):
-    def stopped(statement, hints, rounds, on_event, session):
-        session.stop()
-        return SearchResult(False, message="stopped")
+def test_the_side_assistant_sees_the_proof_and_earlier_questions(client, monkeypatch):
+    seen = []
 
-    monkeypatch.setattr(pipeline, "search", stopped)
-    assert watch(client, start(client).json()["id"])[-1]["status"] == "stopped"
-    monkeypatch.setattr(pipeline, "search", lambda *a, **k: 1 / 0)
-    final = watch(client, start(client).json()["id"])[-1]
-    assert final["status"] == "not_proved" and "internal error" in final["result"]["message"]
+    def fake_ask(question, proof_state, history):
+        seen.append((question, proof_state, list(history)))
+        return f"answer to {question}"
+
+    monkeypatch.setattr(assistant, "ask", fake_ask)
+    ws_id = new_workspace(client)
+    assert client.post(f"/api/workspaces/{ws_id}/ask", json={"question": "why?"}).json() == {"answer": "answer to why?"}
+    client.post(f"/api/workspaces/{ws_id}/ask", json={"question": "and then?"})
+    assert "- main [open]: : T" in seen[0][1]
+    assert seen[1][2] == [("why?", "answer to why?")]
+
+
+def test_the_assistant_failing_is_a_clear_error(client, monkeypatch):
+    def broken(*args):
+        raise LLMError("model unavailable")
+
+    monkeypatch.setattr(assistant, "ask", broken)
+    answer = client.post(f"/api/workspaces/{new_workspace(client)}/ask", json={"question": "why?"})
+    assert answer.status_code == 502 and "model unavailable" in answer.json()["detail"]
+
+
+def test_changes_are_refused_while_a_job_runs(client, monkeypatch):
+    ws_id = new_workspace(client)
+    live = server.WORKSPACES[ws_id]
+    live.workspace._job.acquire()
+    try:
+        assert act(client, ws_id, "main", "assume", on=True).status_code == 409
+        assert act(client, ws_id, "main", "prove").status_code == 409
+    finally:
+        live.workspace._job.release()
 
 
 def test_bad_requests_are_rejected(client):
-    assert start(client, metric="fastest").status_code == 400
-    assert client.post("/api/sessions/nope/hint", json={}).status_code == 404
-    run_id = start(client).json()["id"]
-    assert client.post(f"/api/sessions/{run_id}/dance", json={}).status_code == 400
+    ws_id = new_workspace(client)
+    assert act(client, ws_id, "nope", "prove").status_code == 404
+    assert act(client, ws_id, "main", "dance").status_code == 400
+    bad_plan = act(client, ws_id, "main", "plan", sketch="", main_proof="simp", lemmas=[{"name": "a b", "lean": ": A"}])
+    assert bad_plan.status_code == 400 and "not valid" in bad_plan.json()["detail"]
+    assert client.post("/api/workspaces/nope/stop").status_code == 404
 
 
 def test_the_web_page_is_served(client):
-    assert "<title>Math Finder</title>" in client.get("/").text
+    page = client.get("/").text
+    assert "<title>Math Finder</title>" in page and 'id="step-workspace"' in page
     assert client.get("/app.js").status_code == 200

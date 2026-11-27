@@ -1,18 +1,21 @@
-// Math Finder web page. Talks to interface/server.py: REST for actions, a WebSocket for live events.
+// Math Finder web page. Talks to interface/server.py: REST for actions, a WebSocket for live changes.
+//
+// 1. Write   - you type a theorem in LaTeX.
+// 2. Confirm - it is translated into Lean; you check that it says what you mean.
+// 3. Plan & prove - the workspace: the theorem and its lemmas as a tree. You zoom in on one goal,
+//    make or edit its plan, prove it, or ask the side assistant a question.
+// 4. Proof   - the whole tree goes through Lean's final check and is explained.
 
 const $ = (id) => document.getElementById(id);
 
 const state = {
-  latex: "",
-  sessionId: null,
-  plans: [],          // [{sketch, status, reason, lemmas: [{name, statement, status, feedback}]}]
-  current: null,      // the plan being worked on right now
-  question: null,     // the open question from the search, if any
-  paused: false,
-  startedAt: 0,
-  timer: null,
-  attempts: 0,
-  attemptsOk: 0,
+  latex: "",          // the theorem as you wrote it
+  workspaceId: null,
+  ws: null,           // the workspace from the server: {root, goals: {name: goal}, busy}
+  focus: "main",      // the goal you are looking at (zoomed in on)
+  options: {},        // plans the model proposed, per goal: {name: [option, ...]}
+  editing: null,      // the plan being edited: {goal, sketch, main_proof, lemmas: [{name, lean}]}
+  activity: 0,
 };
 
 // ---------- talking to the server ----------
@@ -83,7 +86,7 @@ function highlightLean(code) {
     .join("\n");
 }
 
-const STEPS = ["write", "confirm", "search", "proof"];
+const STEPS = ["write", "confirm", "workspace", "proof"];
 function setStep(step) {
   const now = STEPS.indexOf(step);
   document.querySelectorAll("#stepper li").forEach((li) => {
@@ -96,6 +99,19 @@ function setStep(step) {
 function reveal(id) {
   $(id).classList.remove("hidden");
   $(id).scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function button(label, onClick, className = "btn") {
+  const b = el("button", className, label);
+  b.onclick = onClick;
+  return b;
 }
 
 function busy(el, text) {
@@ -168,12 +184,9 @@ async function checkEdit() {
 
 async function approve() {
   $("approve-btn").disabled = true;
-  const hints = $("start-hints").value.split("\n").map((h) => h.trim()).filter(Boolean);
-  const metric = document.querySelector('input[name="metric"]:checked').value;
   try {
-    const { id } = await post("/api/sessions", { statement: $("statement").value, latex: state.latex, hints, metric });
-    startWatching(id);
-    hints.forEach((h) => addMessage(`hint: ${h}`, "you"));
+    const { id, workspace } = await post("/api/workspaces", { statement: $("statement").value, latex: state.latex });
+    openWorkspace(id, workspace);
   } catch (e) {
     $("check-errors").className = "notice bad";
     $("check-errors").textContent = "Error: " + e.message;
@@ -182,288 +195,500 @@ async function approve() {
   }
 }
 
-// ---------- step 3: the live search ----------
+// ---------- step 3: the workspace ----------
 
-function startWatching(id) {
-  Object.assign(state, { sessionId: id, plans: [], current: null, question: null, startedAt: Date.now(),
-                         attempts: 0, attemptsOk: 0, paused: false });
-  $("log").innerHTML = "";
-  $("pause-btn").textContent = "Pause";
-  $("search-statement").textContent = "theorem main " + $("statement").value;
+function openWorkspace(id, workspace) {
+  Object.assign(state, { workspaceId: id, ws: workspace, focus: "main", options: {}, editing: null, activity: 0 });
+  $("activity").innerHTML = "";
+  $("conversation").innerHTML = "";
   $("step-result").classList.add("hidden");
-  setStatus("running");
-  $("search-title").textContent = "Searching";
-  setStep("search");
-  renderTree();
-  reveal("step-search");
-  clearInterval(state.timer);
-  state.timer = setInterval(updateStats, 1000);
+  setStep("workspace");
+  render();
+  reveal("step-workspace");
 
   const protocol = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${protocol}://${location.host}/ws/${id}`);
-  ws.onmessage = (message) => handleEvent(JSON.parse(message.data));
-  ws.onclose = () => clearInterval(state.timer);
+  const socket = new WebSocket(`${protocol}://${location.host}/ws/${id}`);
+  socket.onmessage = (message) => handleEvent(JSON.parse(message.data));
+  socket.onclose = () => addActivity("Connection to the server closed.", "error");
 }
 
-function elapsed() {
-  const s = Math.round((Date.now() - state.startedAt) / 1000);
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
-
-function updateStats() {
-  $("stat-time").textContent = elapsed();
-  $("stat-plans").textContent = state.plans.length;
-  $("stat-attempts").textContent = state.attempts;
-}
-
-function setStatus(status) {
-  const badge = $("search-status");
-  badge.textContent = status.replace("_", " ");
-  badge.className = "badge " + status;
-}
-
-function addMessage(text, who = "sys") {
-  const div = document.createElement("div");
-  div.className = "msg " + who;
-  div.textContent = text;
-  $("log").appendChild(div);
-  $("log").scrollTop = $("log").scrollHeight;
-}
-
-function findLemma(name) {
-  return state.current && state.current.lemmas.find((l) => l.name === name);
+function goalAction(name, action, body = {}) {
+  return post(`/api/workspaces/${state.workspaceId}/goals/${encodeURIComponent(name)}/${action}`, body);
 }
 
 function handleEvent(e) {
-  const deep = (e.depth || 0) > 0; // events from a sub-search on a stuck lemma
+  if (e.workspace) state.ws = e.workspace;
   switch (e.kind) {
-    case "start":
-      if (!deep) addMessage("Search started. Trying automation first…");
+    case "log":
+      addActivity(e.text);
       break;
-    case "refuted":
-      addMessage(`The statement is FALSE. Counterexample: ${e.counterexample}`);
-      break;
-    case "round":
-      if (!deep) addMessage(`Round ${e.number}: asking for proof plans…`);
-      break;
-    case "plan_rejected":
-      if (!deep) state.plans.push({ sketch: e.sketch, status: "rejected", reason: e.reason, lemmas: [] });
-      break;
-    case "plan_start":
-      if (deep) { addMessage(`  sub-plan: ${e.sketch}`); break; }
-      if (state.current && state.current.status === "active") state.current.status = "failed";
-      state.current = { sketch: e.sketch, status: "active", reason: "",
-                        lemmas: e.lemmas.map((name) => ({ name, statement: "", status: "open", feedback: "" })) };
-      state.plans.push(state.current);
-      break;
-    case "lemma_start": {
-      if (deep) break;
-      const l = findLemma(e.name);
-      if (l) Object.assign(l, { statement: e.statement, status: "working" });
-      break;
-    }
-    case "subsearch_start":
-      addMessage(`${e.name} is stuck: splitting it into smaller steps.`);
-      break;
-    case "lemma_proved":
-    case "lemma_refuted":
-    case "lemma_stuck": {
-      const status = e.kind.replace("lemma_", "");
-      if (deep) { addMessage(`  sub-lemma ${e.name}: ${status}`); break; }
-      let l = findLemma(e.name);
-      if (!l && state.current) { // a lemma spliced in from a sub-search
-        l = { name: e.name, statement: e.statement, status, feedback: "" };
-        state.current.lemmas.push(l);
-      }
-      if (l) Object.assign(l, { statement: e.statement, status, feedback: e.feedback });
-      break;
-    }
     case "attempt":
-    case "optimize_candidate":
-      state.attempts += 1;
-      if (e.ok) state.attemptsOk += 1;
+      addActivity(`${e.ok ? "✓" : "✗"} proof attempt for ${e.name}${e.source ? ` (${e.source})` : ""}`);
       break;
-    case "plan_failed":
-      if (!deep && state.current) state.current.status = "failed";
-      break;
-    case "done":
-      if (deep) break;
-      if (state.current) state.current.status = "proved";
-      else { // proved directly by automation: there was no plan, so show one node for it
-        state.current = { sketch: e.plan, status: "proved", reason: "", lemmas: [] };
-        state.plans.push(state.current);
-      }
-      addMessage("✓ Lean verified a proof.", "good");
-      break;
-    case "ask_user":
-      state.question = e.question;
-      $("question").textContent = e.question;
-      $("question").classList.remove("hidden");
-      $("chat-input").placeholder = "Type your answer…";
-      $("chat-input").focus();
-      break;
-    case "user_answer":
-      addMessage("Trying again with your idea.");
-      break;
-    case "no_answer":
-      addMessage("(no answer)");
-      break;
-    case "stopped":
-      addMessage(`Stopped: ${e.reason}`);
-      break;
-    case "gave_up":
-      addMessage("No verified proof found.");
-      break;
-    case "optimize_start":
-      addMessage(`Looking for a better proof (current cost ${e.cost})…`);
-      break;
-    case "optimized":
-      addMessage(e.improved ? `Found a better proof: cost ${e.before.cost} → ${e.after.cost}.`
-                            : "Kept the first proof (no better one found).");
-      break;
-    case "explaining":
-      addMessage("Writing the explanation…");
+    case "error":
+      addActivity(e.text, "error");
       break;
     case "finished":
-      showResult(e);
+      showResult(e.result);
       break;
   }
-  renderTree();
-  updateStats();
+  render();
 }
 
-const PLAN_TAGS = { active: "Working", proved: "Proved", failed: "Failed", rejected: "Doesn't fit" };
-const DOTS = { proved: "✓", refuted: "✕", stuck: "!", working: "", open: "" };
-
-function renderTree() {
-  const tree = $("tree");
-  tree.innerHTML = "";
-  if (!state.plans.length) {
-    tree.innerHTML = '<div class="empty"><span class="spinner"></span>Waiting for the first plans…</div>';
-    return;
-  }
-  state.plans.forEach((plan) => {
-    const div = document.createElement("div");
-    div.className = "plan " + plan.status;
-    div.innerHTML = '<div class="plan-top"><span class="plan-tag"></span><div class="sketch"></div></div>';
-    div.querySelector(".plan-tag").textContent = PLAN_TAGS[plan.status] || plan.status;
-    div.querySelector(".sketch").textContent = plan.sketch;
-    if (plan.reason) {
-      const reason = document.createElement("div");
-      reason.className = "reason";
-      reason.textContent = plan.reason;
-      div.appendChild(reason);
-    }
-    if (plan.lemmas.length) {
-      const ul = document.createElement("ul");
-      ul.className = "lemmas";
-      plan.lemmas.forEach((l) => {
-        const li = document.createElement("li");
-        li.className = "lemma " + l.status;
-        li.innerHTML = '<span class="dot"></span><span class="name"></span><span class="stmt"></span><span class="fb"></span>';
-        li.querySelector(".dot").textContent = DOTS[l.status] ?? "";
-        li.querySelector(".name").textContent = l.name;
-        li.querySelector(".stmt").textContent = l.statement;
-        li.querySelector(".fb").textContent = l.feedback;
-        li.onclick = (event) => openLemmaMenu(event, l, plan);
-        ul.appendChild(li);
-      });
-      div.appendChild(ul);
-    }
-    tree.appendChild(div);
-  });
+function addActivity(text, className = "") {
+  const li = el("li", className);
+  li.append(el("time", "", new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })), el("span", "", text));
+  $("activity").prepend(li);
+  state.activity += 1;
+  $("activity-count").textContent = state.activity;
 }
 
-function openLemmaMenu(event, lemma, plan) {
-  event.stopPropagation();
-  const menu = $("lemma-menu");
-  menu.innerHTML = "";
-  const choices = [
-    ["Give a hint about this lemma", () => {
-      $("chat-input").value = `For ${lemma.name} (${lemma.statement}): `;
-      $("chat-input").focus();
-    }],
-    ["Reject it: false or useless", () => send("reject", { name: lemma.name }, `reject ${lemma.name}`)],
-    ["Keep this plan's approach", () => send("pin", { text: plan.sketch }, `pin: ${plan.sketch}`)],
-  ];
-  choices.forEach(([label, onClick]) => {
-    const b = document.createElement("button");
-    b.textContent = label;
-    b.onclick = () => { menu.classList.add("hidden"); onClick(); };
-    menu.appendChild(b);
-  });
-  menu.style.left = `${Math.min(event.pageX, window.innerWidth - 250)}px`;
-  menu.style.top = `${event.pageY}px`;
-  menu.classList.remove("hidden");
-}
-
-async function send(name, body, shown) {
+// Run a request; show its error in the activity list instead of failing silently.
+async function attempt(promise) {
   try {
-    await action(name, body);
-    addMessage(shown, "you");
+    return await promise;
   } catch (e) {
-    addMessage("Error: " + e.message);
+    addActivity(e.message, "error");
+    showTab("activity");
+    return null;
   }
 }
 
-async function sendChat() {
-  const text = $("chat-input").value.trim();
-  if (!text) return;
-  $("chat-input").value = "";
-  if (state.question) { // an open question: this is the answer
-    state.question = null;
-    $("question").classList.add("hidden");
-    $("chat-input").placeholder = "Give a hint, e.g. try induction on n";
-    await send("answer", { text }, `answer: ${text}`);
-  } else {
-    await send("hint", { text }, `hint: ${text}`);
+function goal(name) {
+  return state.ws.goals[name];
+}
+
+// The chain of goals from the theorem down to `name`.
+function pathTo(name) {
+  const path = [name];
+  let current = name;
+  for (;;) {
+    const parent = Object.values(state.ws.goals).find((g) => g.children.includes(current));
+    if (!parent) return path;
+    path.unshift(parent.name);
+    current = parent.name;
   }
 }
 
-async function suggestLemma() {
-  const name = $("lemma-name").value.trim();
-  const statement = $("lemma-statement").value.trim();
-  if (!name || !statement) return;
-  await send("lemma", { name, statement }, `lemma ${name} : ${statement}`);
-  $("lemma-name").value = "";
-  $("lemma-statement").value = "";
+function zoom(name) {
+  state.focus = name;
+  state.editing = null;
+  render();
 }
 
-async function togglePause() {
-  state.paused = !state.paused;
-  await send(state.paused ? "pause" : "resume", {}, state.paused ? "pause" : "resume");
-  $("pause-btn").textContent = state.paused ? "Resume" : "Pause";
+function render() {
+  if (!state.ws) return;
+  if (!state.ws.goals[state.focus]) state.focus = "main";
+  renderBar();
+  renderOutline();
+  renderFocus();
+}
+
+function renderBar() {
+  const crumbs = $("breadcrumb");
+  crumbs.innerHTML = "";
+  pathTo(state.focus).forEach((name, i, path) => {
+    if (i > 0) crumbs.append(el("span", "sep", "›"));
+    const label = name === "main" ? "Theorem" : name;
+    crumbs.append(i === path.length - 1 ? el("span", "here", label) : button(label, () => zoom(name), ""));
+  });
+  const busyNow = state.ws.busy;
+  $("job").classList.toggle("hidden", !busyNow);
+  $("stop-btn").classList.toggle("hidden", !busyNow);
+  const root = goal("main");
+  $("finish-btn").disabled = busyNow || root.status !== "proved" || root.assumes.length > 0;
+}
+
+function renderOutline() {
+  const list = $("outline");
+  list.innerHTML = "";
+  const walk = (name, depth) => {
+    const g = goal(name);
+    const b = button("", () => zoom(name), name === state.focus ? "selected" : "");
+    b.style.paddingLeft = `${8 + depth * 14}px`;
+    b.append(el("i", "dot " + g.status), el("span", "", name === "main" ? "Theorem" : name));
+    b.title = `${name}: ${g.status}`;
+    const li = el("li");
+    li.append(b);
+    list.append(li);
+    g.children.forEach((child) => walk(child, depth + 1));
+  };
+  walk("main", 0);
+}
+
+const STATUS_TEXT = {
+  open: "open", working: "working…", proved: "proved", assumed: "assumed for now", stuck: "stuck", refuted: "false",
+};
+
+function statusBadge(g) {
+  const text = g.status === "proved" && g.assumes.length ? "proved, with assumptions" : STATUS_TEXT[g.status];
+  return el("span", "badge " + (g.status === "proved" && g.assumes.length ? "assumed" : g.status), text);
+}
+
+function leanCode(name, statement) {
+  const code = el("code");
+  code.innerHTML = `<span class="kw">${name === "main" ? "theorem" : "lemma"}</span> ${escapeHtml(name)} ${escapeHtml(statement)}`;
+  return code;
+}
+
+function renderFocus() {
+  const g = goal(state.focus);
+  const busyNow = state.ws.busy;
+  const box = $("focus");
+  box.innerHTML = "";
+
+  // --- heading
+  const head = el("div", "goal-head");
+  head.append(el("span", "kicker", g.name === "main" ? "Theorem" : "Lemma"));
+  head.append(el("span", "goal-name", g.name === "main" ? "main" : g.name), statusBadge(g));
+  const path = pathTo(g.name);
+  if (path.length > 1) {
+    const parent = path[path.length - 2];
+    head.append(button(`↑ Zoom out to ${parent === "main" ? "the theorem" : parent}`, () => zoom(parent), "btn tiny zoom-out"));
+  }
+  box.append(head);
+
+  // --- the statement: Lean first, then the same thing in LaTeX
+  const statement = el("div", "statement");
+  const leanRow = el("div", "statement-row lean");
+  leanRow.append(el("span", "lang", "Lean"), leanCode(g.name, g.lean));
+  if (g.name !== "main" && !busyNow) leanRow.append(button("Edit", () => editStatement(g, leanRow), "btn tiny"));
+  else leanRow.append(el("span"));
+  const latexRow = el("div", "statement-row latex");
+  const latex = el("div", "math");
+  if (g.latex) showText(latex, g.latex);
+  else latex.append(el("span", "muted-text", "(translating from the Lean…)"));
+  latexRow.append(el("span", "lang", "LaTeX"), latex, el("span"));
+  statement.append(leanRow, latexRow);
+  box.append(statement);
+
+  if (g.assumes.length && g.status === "proved") {
+    box.append(el("div", "warn-box", `Proved, but only if these assumed lemmas hold: ${g.assumes.join(", ")}. Prove them to finish.`));
+  }
+  if (g.feedback && ["stuck", "refuted"].includes(g.status)) box.append(el("div", "error-box", "Lean: " + g.feedback));
+
+  // --- what you can do with this goal
+  const actions = el("div", "goal-actions");
+  const proveLabel = g.children.length ? "Prove its lemmas, then it" : "Prove it";
+  const prove = button(proveLabel, () => attempt(goalAction(g.name, "prove")), "btn primary");
+  const auto = button("Let the search find a proof", () => attempt(goalAction(g.name, "auto")));
+  const assumeLabel = g.status === "assumed" ? "Stop assuming it" : "Assume it for now";
+  const assume = button(assumeLabel, () => applyWorkspace(goalAction(g.name, "assume", { on: g.status !== "assumed" })));
+  [prove, auto, assume].forEach((b) => { b.disabled = busyNow; });
+  if (g.status === "proved") prove.disabled = auto.disabled = true;
+  if (g.name === "main" || g.status === "proved") assume.disabled = true;
+  actions.append(prove, auto, assume);
+  box.append(actions);
+
+  // --- the plan
+  box.append(state.editing && state.editing.goal === g.name ? planEditor(g) : planSection(g, busyNow));
+  if (state.options[g.name]) box.append(optionsSection(g, busyNow));
+  if (!g.children.length && g.status === "proved" && g.proof) box.append(proofSection(g));
+  if (g.attempts.length) box.append(attemptsSection(g));
+}
+
+function planSection(g, busyNow) {
+  const section = el("div", "section");
+  const head = el("div", "section-head");
+  head.append(el("h3", "", "Plan"));
+  const buttons = el("div", "goal-actions");
+  buttons.style.marginTop = "0";
+  const suggest = button(g.children.length ? "Suggest other plans" : "Suggest plans", () => suggestPlans(g, suggest), "btn tiny");
+  const edit = button(g.children.length ? "Edit plan" : "Write a plan", () => startEditing(g), "btn tiny");
+  const remove = button("Remove plan", () => applyWorkspace(goalAction(g.name, "clear-plan")), "btn tiny danger");
+  [suggest, edit, remove].forEach((b) => { b.disabled = busyNow || g.status === "proved"; });
+  buttons.append(suggest, edit);
+  if (g.children.length) buttons.append(remove);
+  head.append(buttons);
+  section.append(head);
+
+  if (!g.children.length && !g.sketch) {
+    section.append(el("p", "muted-text",
+      "No plan yet. A goal can be proved directly, or split into smaller lemmas that are proved one at a time. " +
+      "Ask for suggestions or write your own."));
+    return section;
+  }
+  if (g.sketch) section.append(el("p", "idea", g.sketch));
+
+  const list = el("ol", "lemma-list");
+  g.children.forEach((name) => list.append(lemmaCard(goal(name), busyNow)));
+  section.append(list);
+
+  const main = el("div", "main-proof");
+  main.append(el("span", "field-label", `How the lemmas prove ${g.name === "main" ? "the theorem" : g.name} (Lean)`));
+  const pre = el("pre");
+  pre.innerHTML = highlightLean(g.proof || "(no main proof yet)");
+  main.append(pre);
+  section.append(main);
+
+  if (g.problems.length) section.append(el("div", "error-box", "This plan doesn't fit together yet:\n" + g.problems.join("\n")));
+  else section.append(el("div", "ok-box", "✓ Lean checked: if the lemmas are true, this proof of the goal works."));
+  return section;
+}
+
+function lemmaCard(lemma, busyNow) {
+  const card = el("li", "lemma-card " + lemma.status);
+  const title = el("div", "lemma-title");
+  title.append(el("b", "", lemma.name), statusBadge(lemma));
+  if (lemma.children.length) title.append(el("span", "muted-text", `· ${lemma.children.length} lemmas inside`));
+  const latex = el("div", "lemma-latex math");
+  if (lemma.latex) showText(latex, lemma.latex);
+  card.append(title, leanCode(lemma.name, lemma.lean), latex);
+  card.querySelector("code").className = "lemma-lean";
+  if (lemma.feedback && ["stuck", "refuted"].includes(lemma.status)) card.append(el("div", "lemma-feedback", lemma.feedback));
+  const buttons = el("div", "lemma-buttons");
+  buttons.append(button("Zoom in →", () => zoom(lemma.name), "btn tiny"));
+  if (!["proved", "assumed"].includes(lemma.status)) {
+    const prove = button("Prove", () => attempt(goalAction(lemma.name, "prove")), "btn tiny");
+    const assume = button("Assume for now", () => applyWorkspace(goalAction(lemma.name, "assume", { on: true })), "btn tiny");
+    prove.disabled = assume.disabled = busyNow;
+    buttons.append(prove, assume);
+  }
+  card.append(buttons);
+  return card;
+}
+
+async function suggestPlans(g, suggestButton) {
+  suggestButton.disabled = true;
+  busy(suggestButton, "Asking for plans…");
+  addActivity(`Asking for plans for ${g.name}…`);
+  const answer = await attempt(goalAction(g.name, "propose"));
+  if (answer) {
+    state.options[g.name] = answer.options;
+    addActivity(`${answer.options.length} plans proposed for ${g.name}.`);
+  }
+  render();
+}
+
+function optionsSection(g, busyNow) {
+  const section = el("div", "section");
+  const head = el("div", "section-head");
+  head.append(el("h3", "", "Suggested plans"));
+  head.append(button("Dismiss", () => { delete state.options[g.name]; render(); }, "btn tiny"));
+  section.append(head);
+  const grid = el("div", "options-grid");
+  state.options[g.name].forEach((option, i) => {
+    const fits = option.problems.length === 0;
+    const card = el("div", "option" + (fits ? " fits" : ""));
+    card.append(el("h4", "", `Plan ${String.fromCharCode(65 + i)}`), el("div", "", option.sketch));
+    if (option.lemmas.length) {
+      const list = el("ol");
+      option.lemmas.forEach((lemma) => {
+        const li = el("li");
+        const latex = el("div", "math");
+        showText(latex, lemma.latex || lemma.lean);
+        li.append(latex, el("div", "lemma-lean", `${lemma.name} ${lemma.lean}`));
+        list.append(li);
+      });
+      card.append(list);
+    } else {
+      card.append(el("p", "muted-text", "No lemmas: a direct proof."));
+    }
+    card.append(fits ? el("div", "ok-box", "✓ Lean: fits together")
+                     : el("div", "error-box", "Lean: doesn't fit yet\n" + option.problems[0]));
+    const buttons = el("div", "buttons");
+    const use = button("Use this plan", () => usePlan(g, option), "btn tiny primary");
+    const edit = button("Edit first", () => startEditing(g, option), "btn tiny");
+    use.disabled = edit.disabled = busyNow;
+    buttons.append(use, edit);
+    card.append(buttons);
+    grid.append(card);
+  });
+  section.append(grid);
+  return section;
+}
+
+async function usePlan(g, plan) {
+  addActivity(`Using a plan for ${g.name}; Lean is checking it and the LaTeX is being written…`);
+  const answer = await attempt(goalAction(g.name, "plan", {
+    sketch: plan.sketch, main_proof: plan.main_proof,
+    lemmas: plan.lemmas.map((l) => ({ name: l.name, lean: l.lean, latex: l.latex || "" })),
+  }));
+  if (!answer) return false;
+  state.ws = answer.workspace;
+  delete state.options[g.name];
+  state.editing = null;
+  addActivity(answer.problems.length ? `The plan for ${g.name} doesn't fit together yet.` : `Plan for ${g.name} saved; Lean says it fits.`);
+  render();
+  return true;
+}
+
+function startEditing(g, from) {
+  const source = from || { sketch: g.sketch, main_proof: g.proof,
+                           lemmas: g.children.map((n) => ({ name: n, lean: goal(n).lean, latex: goal(n).latex })) };
+  state.editing = { goal: g.name, sketch: source.sketch, main_proof: source.main_proof,
+                    lemmas: source.lemmas.map((l) => ({ ...l })) };
+  render();
+}
+
+function planEditor(g) {
+  const draft = state.editing;
+  const section = el("div", "section");
+  const head = el("div", "section-head");
+  head.append(el("h3", "", `Edit the plan for ${g.name === "main" ? "the theorem" : g.name}`));
+  section.append(head);
+  const editor = el("div", "editor");
+  editor.append(el("p", "note",
+    "Write each lemma in Lean, as it would follow `lemma name`. When you save, Lean checks the plan " +
+    "and the LaTeX is written from your Lean."));
+
+  const idea = el("label", "field");
+  const ideaInput = el("textarea");
+  ideaInput.rows = 2;
+  ideaInput.value = draft.sketch;
+  ideaInput.oninput = () => { draft.sketch = ideaInput.value; };
+  idea.append(el("span", "field-label", "Idea"), ideaInput);
+  editor.append(idea);
+
+  editor.append(el("span", "field-label", "Lemmas, in order (each may use the ones before it)"));
+  draft.lemmas.forEach((lemma, i) => {
+    const row = el("div", "editor-row");
+    const name = el("input");
+    name.value = lemma.name;
+    name.placeholder = "name";
+    name.oninput = () => { lemma.name = name.value; };
+    const lean = el("input");
+    lean.value = lemma.lean;
+    lean.placeholder = "(a b : ℝ) : 0 ≤ (a - b) ^ 2";
+    lean.oninput = () => { lemma.lean = lean.value; lemma.latex = ""; };
+    const remove = button("×", () => { draft.lemmas.splice(i, 1); render(); }, "btn editor-remove");
+    remove.title = "Remove this lemma";
+    row.append(name, lean, remove);
+    editor.append(row);
+  });
+  editor.append(button("+ Add a lemma", () => {
+    draft.lemmas.push({ name: `step_${draft.lemmas.length + 1}`, lean: "", latex: "" });
+    render();
+  }, "btn tiny"));
+
+  const main = el("label", "field");
+  const mainInput = el("textarea");
+  mainInput.rows = 3;
+  mainInput.value = draft.main_proof;
+  mainInput.placeholder = "e.g. nlinarith [step_1 a b]";
+  mainInput.oninput = () => { draft.main_proof = mainInput.value; };
+  main.append(el("span", "field-label", "How the lemmas prove the goal (Lean tactics)"), mainInput);
+  editor.append(main);
+
+  const buttons = el("div", "goal-actions");
+  const save = button("Save and check with Lean", async () => {
+    save.disabled = true;
+    busy(save, "Checking…");
+    if (!(await usePlan(g, draft))) render();
+  }, "btn primary");
+  buttons.append(save, button("Cancel", () => { state.editing = null; render(); }));
+  editor.append(buttons);
+  section.append(editor);
+  return section;
+}
+
+function editStatement(g, row) {
+  row.innerHTML = "";
+  const input = el("input");
+  input.value = g.lean;
+  const save = button("Save", async () => {
+    save.disabled = true;
+    const answer = await attempt(goalAction(g.name, "statement", { lean: input.value }));
+    if (!answer) return;
+    if (answer.errors.length) {
+      addActivity(`Lean rejected the new statement of ${g.name}: ${answer.errors[0]}`, "error");
+      showTab("activity");
+      save.disabled = false;
+      return;
+    }
+    state.ws = answer.workspace;
+    render();
+  }, "btn tiny primary");
+  row.append(el("span", "lang", "Lean"), input, save);
+  input.focus();
+}
+
+function proofSection(g) {
+  const section = el("div", "section");
+  section.append(el("div", "section-head")).append(el("h3", "", "Proof (Lean)"));
+  const pre = el("pre");
+  pre.innerHTML = highlightLean(g.proof);
+  section.append(pre);
+  return section;
+}
+
+function attemptsSection(g) {
+  const details = el("details", "attempts");
+  details.append(el("summary", "", `Attempts Lean checked for ${g.name} (${g.attempts.length})`));
+  g.attempts.slice().reverse().forEach((a) => {
+    const item = el("div", "attempt");
+    const headLine = el("div", "attempt-head");
+    headLine.append(el("b", a.ok ? "ok" : "bad", a.ok ? "accepted" : "rejected"), document.createTextNode(` · from ${a.source}`));
+    const pre = el("pre");
+    pre.innerHTML = highlightLean(a.proof);
+    item.append(headLine, pre);
+    if (a.error) item.append(el("div", "error-box", a.error));
+    details.append(item);
+  });
+  return details;
+}
+
+async function applyWorkspace(request) {
+  const answer = await attempt(request);
+  if (answer && answer.workspace) state.ws = answer.workspace;
+  render();
+}
+
+// ---------- the side assistant ----------
+
+function showTab(name) {
+  ["ask", "activity"].forEach((tab) => {
+    $(`tab-${tab}`).classList.toggle("active", tab === name);
+    $(`pane-${tab}`).classList.toggle("hidden", tab !== name);
+  });
+}
+
+async function askQuestion(text) {
+  const question = (text || $("ask-input").value).trim();
+  if (!question || !state.workspaceId) return;
+  $("ask-input").value = "";
+  const focusNote = state.focus === "main" ? "" : ` (I am looking at ${state.focus}.)`;
+  $("conversation").append(el("div", "bubble you", question));
+  const answerBubble = el("div", "bubble assistant");
+  busy(answerBubble, "Thinking…");
+  $("conversation").append(answerBubble);
+  answerBubble.scrollIntoView({ block: "nearest" });
+  $("ask-btn").disabled = true;
+  try {
+    const { answer } = await post(`/api/workspaces/${state.workspaceId}/ask`, { question: question + focusNote });
+    renderMarkdown(answerBubble, answer);
+  } catch (e) {
+    answerBubble.textContent = "Couldn't answer: " + e.message;
+  } finally {
+    $("ask-btn").disabled = false;
+    $("conversation").scrollTop = $("conversation").scrollHeight;
+  }
+}
+
+async function finishProof() {
+  $("finish-btn").disabled = true;
+  await attempt(post(`/api/workspaces/${state.workspaceId}/finish`));
 }
 
 // ---------- step 4: the result ----------
 
-function showResult(e) {
-  clearInterval(state.timer);
-  setStatus(e.status);
-  $("search-title").textContent = "Search";
-  const r = e.result || {};
+function showResult(r) {
   $("result-icon").className = "result-icon " + (r.proved ? "ok" : "bad");
   $("result-icon").textContent = r.proved ? "✓" : "✕";
-  $("result-title").textContent = r.proved ? "Proved, and checked by Lean" : "No proof found";
-  $("result-sub").textContent = r.proved ? $("search-statement").textContent : (r.message || "");
-  // count the lemmas in the final proof (the optimizer may have removed some)
-  const lemmas = r.proved ? Math.max(0, (r.lean_code.match(/^theorem /gm) || []).length - 1) : 0;
+  $("result-title").textContent = r.proved ? "Proved, and checked by Lean" : "The final check failed";
+  $("result-sub").textContent = r.proved ? "theorem main " + goal("main").lean : (r.message || "");
+  const lemmaCount = Object.keys(state.ws.goals).length - 1;
+  const attempts = Object.values(state.ws.goals).reduce((n, g) => n + g.attempts.length, 0);
   const metrics = [
-    [elapsed(), "time"],
-    [String(r.rounds ?? 0), "planning rounds"],
-    [String(state.plans.length), "plans considered"],
-    [String(lemmas), "lemmas used"],
-    [`${state.attemptsOk}/${state.attempts}`, "attempts that worked"],
+    [String(lemmaCount), "lemmas"],
+    [String(Math.max(...Object.keys(state.ws.goals).map((n) => pathTo(n).length)) - 1), "levels deep"],
+    [String(attempts), "attempts Lean checked"],
   ];
-  if (r.optimization) metrics.push([`${r.optimization.before.cost} → ${r.optimization.after.cost}`, "proof cost"]);
   $("metrics").innerHTML = "";
-  metrics.forEach(([v, k]) => {
-    const div = document.createElement("div");
-    div.className = "metric";
-    div.innerHTML = '<div class="v"></div><div class="k"></div>';
-    div.querySelector(".v").textContent = v;
-    div.querySelector(".k").textContent = k;
-    $("metrics").appendChild(div);
+  metrics.forEach(([value, label]) => {
+    const tile = el("div", "metric");
+    tile.append(el("div", "v", value), el("div", "k", label));
+    $("metrics").append(tile);
   });
   if (r.explanation) renderMarkdown($("explanation"), r.explanation);
   else $("explanation").textContent = r.message || "";
@@ -484,7 +709,7 @@ async function copyProof() {
 }
 
 function startOver() {
-  ["step-approve", "step-search", "step-result"].forEach((id) => $(id).classList.add("hidden"));
+  ["step-approve", "step-workspace", "step-result"].forEach((id) => $(id).classList.add("hidden"));
   setStep("write");
   window.scrollTo({ top: 0, behavior: "smooth" });
   $("latex").focus();
@@ -501,15 +726,18 @@ window.addEventListener("DOMContentLoaded", () => {
   $("formalize-btn").onclick = formalize;
   $("check-btn").onclick = checkEdit;
   $("approve-btn").onclick = approve;
-  $("send-btn").onclick = sendChat;
-  $("chat-input").addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
-  $("lemma-btn").onclick = suggestLemma;
-  $("pause-btn").onclick = togglePause;
-  $("stop-btn").onclick = () => send("stop", {}, "stop");
+  $("stop-btn").onclick = () => attempt(post(`/api/workspaces/${state.workspaceId}/stop`));
+  $("finish-btn").onclick = finishProof;
+  $("tab-ask").onclick = () => showTab("ask");
+  $("tab-activity").onclick = () => showTab("activity");
+  $("ask-form").onsubmit = (e) => { e.preventDefault(); askQuestion(); };
+  $("ask-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); askQuestion(); }
+  });
+  document.querySelectorAll("#suggestions .chip").forEach((chip) => { chip.onclick = () => askQuestion(chip.dataset.q); });
   $("copy-btn").onclick = copyProof;
   $("again-btn").onclick = startOver;
   $("theme-btn").onclick = toggleTheme;
-  document.addEventListener("click", () => $("lemma-menu").classList.add("hidden"));
   try {
     const saved = localStorage.getItem("mf-theme");
     if (saved) document.documentElement.dataset.theme = saved;
@@ -518,4 +746,4 @@ window.addEventListener("DOMContentLoaded", () => {
   updatePreview();
 });
 // KaTeX loads with `defer`, so render the preview again once it is ready.
-window.addEventListener("load", updatePreview);
+window.addEventListener("load", () => { updatePreview(); render(); });

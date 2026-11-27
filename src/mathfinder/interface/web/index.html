@@ -23,7 +23,7 @@
   <ol class="stepper" id="stepper">
     <li data-step="write"><span>1</span>Write</li>
     <li data-step="confirm"><span>2</span>Confirm</li>
-    <li data-step="search"><span>3</span>Search</li>
+    <li data-step="workspace"><span>3</span>Plan &amp; prove</li>
     <li data-step="proof"><span>4</span>Proof</li>
   </ol>
   <button id="theme-btn" class="icon-btn" title="Switch light / dark" aria-label="Switch light or dark theme"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
@@ -95,47 +95,58 @@
     <div id="verdict" class="notice"></div>
     <div class="actions">
       <button id="check-btn" class="btn">Check my edit</button>
-      <button id="approve-btn" class="btn primary">Approve and prove <span aria-hidden="true">→</span></button>
+      <button id="approve-btn" class="btn primary">Approve and start planning <span aria-hidden="true">→</span></button>
     </div>
   </section>
 
-  <!-- 3. the live search -->
-  <section id="step-search" class="panel hidden">
-    <div class="panel-head row-between">
-      <div>
-        <h2><span id="search-title">Searching</span> <span id="search-status" class="badge">running</span></h2>
-        <p class="lead mono" id="search-statement"></p>
-      </div>
-      <div class="stats">
-        <div><b id="stat-time">0:00</b><span>elapsed</span></div>
-        <div><b id="stat-plans">0</b><span>plans</span></div>
-        <div><b id="stat-attempts">0</b><span>attempts</span></div>
+  <!-- 3. the workspace: plan and prove together -->
+  <section id="step-workspace" class="panel workspace hidden">
+    <div class="ws-bar">
+      <nav id="breadcrumb" class="breadcrumb" aria-label="Where you are in the proof"></nav>
+      <div class="ws-bar-right">
+        <span id="job" class="job hidden"><span class="spinner"></span><span id="job-text">Working…</span></span>
+        <button id="stop-btn" class="btn danger hidden">Stop</button>
+        <button id="finish-btn" class="btn primary" disabled
+                title="Becomes available when the theorem is proved without assumptions">Check whole proof →</button>
       </div>
     </div>
-    <div class="search-layout">
-      <div>
-        <span class="field-label">Plans and lemmas <em>· click a lemma for options</em></span>
-        <div id="tree" class="tree"></div>
-      </div>
-      <aside class="chat">
-        <span class="field-label">Work together</span>
-        <div id="question" class="question hidden"></div>
-        <div id="log" class="log"></div>
-        <div class="chat-input">
-          <input id="chat-input" placeholder="Give a hint, e.g. try induction on n" spellcheck="false">
-          <button id="send-btn" class="btn primary">Send</button>
+
+    <div class="ws-grid">
+      <!-- zoomed out: every goal at once -->
+      <aside class="outline-panel">
+        <span class="field-label">Outline</span>
+        <ul id="outline" class="outline"></ul>
+        <div class="legend">
+          <span><i class="dot open"></i>open</span><span><i class="dot working"></i>working</span>
+          <span><i class="dot proved"></i>proved</span><span><i class="dot assumed"></i>assumed</span>
+          <span><i class="dot stuck"></i>stuck</span>
         </div>
-        <details class="options compact">
-          <summary>Suggest a lemma</summary>
-          <div class="chat-input">
-            <input id="lemma-name" placeholder="name" spellcheck="false" class="narrow">
-            <input id="lemma-statement" placeholder="(a b : ℝ) : 0 ≤ (a - b) ^ 2" spellcheck="false">
-            <button id="lemma-btn" class="btn">Add</button>
+      </aside>
+
+      <!-- zoomed in: one goal -->
+      <div id="focus" class="focus"></div>
+
+      <!-- on the side: ask anything, and what has happened -->
+      <aside class="side">
+        <div class="tabs" role="tablist">
+          <button id="tab-ask" class="tab active" role="tab">Ask</button>
+          <button id="tab-activity" class="tab" role="tab">Activity <span id="activity-count" class="count"></span></button>
+        </div>
+        <div id="pane-ask" class="pane">
+          <p class="hint-text">Ask a side question at any time. The answer doesn't change or stop the proof.</p>
+          <div id="conversation" class="conversation"></div>
+          <div class="suggestions" id="suggestions">
+            <button class="chip" data-q="Why is this goal true, informally?">Why is this true?</button>
+            <button class="chip" data-q="What does the last Lean error mean, and how could I fix it?">Explain the Lean error</button>
+            <button class="chip" data-q="Suggest a useful lemma for this goal, in Lean and LaTeX.">Suggest a lemma</button>
           </div>
-        </details>
-        <div class="controls">
-          <button id="pause-btn" class="btn">Pause</button>
-          <button id="stop-btn" class="btn danger">Stop</button>
+          <form id="ask-form" class="ask-form">
+            <textarea id="ask-input" rows="2" placeholder="Ask about this proof…" spellcheck="false"></textarea>
+            <button class="btn primary" id="ask-btn">Ask</button>
+          </form>
+        </div>
+        <div id="pane-activity" class="pane hidden">
+          <ol id="activity" class="activity"></ol>
         </div>
       </aside>
     </div>
@@ -167,6 +178,5 @@
 </main>
 
 <footer class="footer">Running on this computer · Every proof is checked by Lean 4 and Mathlib</footer>
-<div id="lemma-menu" class="menu hidden"></div>
 </body>
 </html>
