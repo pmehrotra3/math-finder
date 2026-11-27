@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from mathfinder.lean.checker import DeclResult
 from mathfinder.proving import workspace as wsmod
 from mathfinder.proving.planner import Lemma, Plan
 from mathfinder.proving.workspace import Busy, Workspace
@@ -138,7 +139,7 @@ def test_a_plan_without_lemmas_tries_its_own_proof_first(fake):
 @pytest.mark.lean
 def test_citing_an_established_project_passes_the_real_final_check(monkeypatch):
     """Real Lean: project A proves a² + b² ≥ 2ab; project B cites it to prove x² + 1 ≥ 2x."""
-    from mathfinder.interface.server import in_namespace
+    from mathfinder.interface.live import in_namespace
 
     monkeypatch.setattr(wsmod, "to_latex", lambda name, lean: "")  # no model needed
     amgm = "(a b : ℝ) : a ^ 2 + b ^ 2 ≥ 2 * a * b"
@@ -174,3 +175,21 @@ def test_notes_reach_every_later_plan_and_proof_attempt(fake, monkeypatch):
     assert asked["hints"] == ["use induction", "mod 3"]
     assert proved_with == ["Hint: use induction"]
     assert "Hints from the mathematician: use induction" in ws.summary()
+
+
+def test_a_written_proof_is_kept_only_if_lean_accepts_it(fake, monkeypatch):
+    ws = Workspace(": T")
+    assert ws.try_proof("main", "simp") == (True, "")
+    assert (ws.goals["main"].status, ws.goals["main"].proof) == ("proved", "simp")
+    rejected = {"main": DeclResult("main", ok=False, errors=["linarith failed"])}
+    monkeypatch.setattr(wsmod, "check_decls", lambda decls, preamble="": rejected)
+    assert ws.try_proof("main", "linarith") == (False, "linarith failed")
+    assert (ws.goals["main"].status, ws.goals["main"].proof) == ("proved", "simp")  # earlier work survives
+
+
+def test_a_written_proof_of_a_planned_goal_becomes_its_main_proof(fake):
+    ws = Workspace(": T")
+    ws.set_plan("main", "split", "sorry", lemmas("good_a"))
+    ws.run(lambda: ws.prove("good_a"))
+    assert ws.try_proof("main", "exact good_a") == (True, "")
+    assert ws.goals["main"].children == ["good_a"] and ws.goals["main"].proof == "exact good_a"

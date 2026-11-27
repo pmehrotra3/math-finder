@@ -7,6 +7,8 @@ LaTeX version of it, and either a direct proof or a PLAN: an idea, a list of sma
   propose(goal)         ask the model for plans, already checked by Lean
   set_plan(goal, ...)   use a plan as it is or after editing it (Lean is the source of truth;
                         the LaTeX is translated from the Lean)
+  try_proof(goal, proof)
+                        check a proof that you (or the assistant) wrote; Lean answers at once
   prove(goal)           prove it: children first, then its main proof (or directly, if no plan)
   auto(goal)            let the full search find a plan and proofs on its own
   assume(goal)          skip it for now; everything above it then counts as "proved, assuming"
@@ -354,6 +356,34 @@ class Workspace:
             self._prove_directly(g)
         self._log(f"{name}: {g.status}" + (f" ({g.feedback[:120]})" if g.status != "proved" else ""))
         self._emit_goal(name)
+
+    def try_proof(self, name: str, proof: str) -> tuple[bool, str]:
+        """Check a proof written by hand. For a goal with a plan it becomes the plan's main proof
+        (so it may use the plan's lemmas); otherwise it is a direct proof. Returns (accepted, error)."""
+        g = self.goals[name]
+        before = (g.proof, g.status, g.sketch)  # kept if Lean rejects the new proof
+        g.proof = proof.strip()
+        g.status = "working"
+        self._emit_goal(name)
+        if g.children:
+            checked = len(g.attempts)
+            self._check_main_proof(g)  # needs the lemmas proved (or assumed) first
+            if len(g.attempts) > checked:
+                g.attempts[-1]["source"] = "written"
+        else:
+            preamble = (self.background() + "\n\n" + preamble_for(self.lemmas_for(self.context_for(name)))).strip()
+            result = check_decls([Decl(name, g.lean, g.proof)], preamble)[name]
+            error = "\n".join(result.errors)[:MAX_ERROR]
+            g.attempts.append({"proof": g.proof, "ok": result.ok, "error": error, "source": "written"})
+            g.status, g.feedback = ("proved", "") if result.ok else ("stuck", error)
+            if result.ok:
+                g.established_by, g.sketch = "", ""
+        accepted, error = g.status == "proved", g.feedback
+        if not accepted and before[1] in ("proved", "assumed"):
+            g.proof, g.status, g.sketch = before  # a failed try doesn't undo earlier work
+        self._log(f"{name}: " + ("Lean accepted the proof" if accepted else "Lean rejected the proof"))
+        self._emit_goal(name)
+        return accepted, error
 
     def _prove_directly(self, g: Goal) -> None:
         def record(attempt: dict) -> None:

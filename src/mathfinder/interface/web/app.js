@@ -24,7 +24,8 @@ const state = {
   editing: null,      // the plan being edited: {goal, sketch, main_proof, lemmas: [{name, lean}]}
   shown: new Set(),   // ids of the chat lines already on screen
   attempts: 0,        // proof attempts Lean checked in the running job
-  waiting: 0,         // chat messages still waiting for the assistant's reply
+  agent: { state: "idle", step: 0 },  // the assistant: idle | thinking | acting | waiting (for a job)
+  sent: [],           // your earlier messages, for the up arrow
 };
 
 // ---------- talking to the server ----------
@@ -294,7 +295,7 @@ function openProject(project) {
   closeProject();
   Object.assign(state, {
     projectId: project.id, project, ws: project.workspace, focus: "main", options: {}, editing: null,
-    library: null, choosing: null, shown: new Set(), attempts: 0,
+    library: null, choosing: null, shown: new Set(), attempts: 0, agent: project.agent || { state: "idle", step: 0 },
   });
   showView("project");
   showText($("project-title"), project.title);
@@ -318,6 +319,11 @@ function handleEvent(e) {
     case "chat":
       addLine(e.entry);
       scrollChat();
+      if ((e.entry.actions || []).some((a) => a.do === "note" || a.do === "clear_notes")) refreshNotes();
+      break;
+    case "agent":
+      state.agent = { state: e.state, step: e.step };
+      renderAgent();
       break;
     case "attempt":
       state.attempts += 1;
@@ -344,6 +350,7 @@ function render() {
   if (!state.ws) return;
   if (!state.ws.goals[state.focus]) state.focus = "main";
   renderHead();
+  renderAgent();
   renderNotes();
   renderBreadcrumb();
   renderOutline();
@@ -359,7 +366,7 @@ function renderHead() {
   const working = Object.values(state.ws.goals).find((g) => g.status === "working");
   const what = working ? `Working on ${working.name === "main" ? "the theorem" : working.name}` : "Working";
   $("job-text").textContent = what + (state.attempts ? ` · ${state.attempts} attempts checked` : "") + "…";
-  $("stop-btn").classList.toggle("hidden", !busyNow);
+  $("stop-btn").classList.toggle("hidden", !busyNow || agentWorking());
   $("finish-btn").disabled = busyNow || root.status !== "proved" || root.assumes.length > 0;
 }
 
@@ -372,14 +379,43 @@ function statusBadgeFor(status, g) {
 // ---------- the chat ----------
 
 const ACTION_TEXT = {
-  stop: "Stop", note: "Hint", clear_notes: "Hints", prove: "Prove", search: "Search", plan: "Plan",
-  clear_plan: "Plan", statement: "Statement", assume: "Assume", cite: "Cite", finish: "Final check",
+  stop: "Stop", wait: "Wait", note: "Hint", clear_notes: "Hints", try_proof: "Lean", prove: "Prove",
+  search: "Search", plan: "Plan", clear_plan: "Plan", statement: "Statement", assume: "Assume", cite: "Cite",
+  finish: "Final check",
 };
 
+function agentWorking() {
+  return state.agent.state !== "idle";
+}
+
+// While the assistant works: "Thinking…" at the end of the chat, and a status line with Stop.
+function renderAgent() {
+  const working = agentWorking();
+  const status = $("agent-status");
+  status.classList.toggle("hidden", !working && !(state.ws && state.ws.busy));
+  const text = { thinking: "Thinking", acting: "Working on the proof", waiting: "Waiting for Lean" }[state.agent.state]
+    || "A job is running";
+  $("agent-text").textContent = text + (working && state.agent.step > 1 ? ` · step ${state.agent.step}` : "") + "…";
+  $("chat-input").placeholder = working
+    ? "Add a message to steer it. It reads it at its next step."
+    : "Discuss the proof, or tell the assistant what to do. Type / for commands.";
+  if (state.agent.state === "thinking") {
+    spinnerText(thinking, "Thinking…");
+    $("messages").append(thinking);
+  } else {
+    thinking.remove();
+  }
+}
+
 function addLine(entry) {
-  if (entry.id && state.shown.has(entry.id)) return;
-  if (entry.id) state.shown.add(entry.id);
   const box = $("messages");
+  if (entry.id && state.shown.has(entry.id)) {
+    // A line we show already: the assistant's reply, with the results of its actions coming in.
+    const old = box.querySelector(`[data-id="${entry.id}"]`);
+    if (old && entry.role !== "event") old.replaceWith(messageFor(entry));
+    return;
+  }
+  if (entry.id) state.shown.add(entry.id);
   box.querySelector(".chat-welcome")?.remove();
 
   if (entry.role === "event") {
@@ -393,11 +429,17 @@ function addLine(entry) {
     line.append(el("i", "event-dot " + eventKind(entry.text)), el("span", "", entry.text));
     group.append(line);
     foldEvents(group);
-    if (state.waiting) box.append(thinking);
+    if (thinking.isConnected) box.append(thinking);
     return;
   }
 
+  box.append(messageFor(entry));
+  if (thinking.isConnected) box.append(thinking);
+}
+
+function messageFor(entry) {
   const bubble = el("div", "msg " + entry.role);
+  if (entry.id) bubble.dataset.id = entry.id;
   if (entry.role === "you") {
     bubble.textContent = entry.text;
   } else {
@@ -407,15 +449,23 @@ function addLine(entry) {
     if (entry.actions && entry.actions.length) {
       const done = el("div", "did");
       entry.actions.forEach((a) => {
-        const chip = el("div", "did-item " + (a.ok ? "ok" : "bad"));
-        chip.append(el("b", "", (a.ok ? "✓ " : "✕ ") + (ACTION_TEXT[a.do] || a.do)), el("span", "", a.text));
+        const running = a.ok === null || a.ok === undefined;
+        const chip = el("div", "did-item " + (running ? "running" : a.ok ? "ok" : "bad"));
+        const mark = running ? el("span", "spinner") : document.createTextNode(a.ok ? "✓ " : "✕ ");
+        const label = el("b", "", ACTION_TEXT[a.do] || a.do);
+        label.prepend(mark);
+        chip.append(label, el("span", "", a.text));
         done.append(chip);
+        if (a.lean) {
+          const code = el("pre", "did-lean");
+          code.innerHTML = highlightLean(a.lean);
+          done.append(code);
+        }
       });
       bubble.append(done);
     }
   }
-  box.append(bubble);
-  if (state.waiting) box.append(thinking);
+  return bubble;
 }
 
 function eventKind(text) {
@@ -449,15 +499,18 @@ function notice(text, kind = "") {
 function scrollChat() {
   const box = $("messages");
   if (!box.children.length) showWelcome();
+  // the suggestions help you start; once the conversation is going they are only in the way
+  $("suggestions").classList.toggle("hidden", !box.querySelector(".chat-welcome"));
   box.scrollTop = box.scrollHeight;
 }
 
 function showWelcome() {
   const welcome = el("div", "chat-welcome");
   welcome.append(el("h3", "", "Work on this proof together"));
-  welcome.append(el("p", "", "Ask about the math, or tell the assistant what to do: make a plan, prove a lemma, " +
-    "stop and try another idea. It changes the proof only when you ask, and Lean checks every step. " +
-    "The proof next to the chat updates as it goes; you can also use its buttons yourself."));
+  welcome.append(el("p", "", "Ask about the math, or give the assistant a task: “plan this and prove it”, " +
+    "“write the proof by induction”. It works step by step, waits for Lean, reads what Lean says, and keeps going " +
+    "until the task is done. You can write while it works to steer it, and press Esc to stop it. " +
+    "The proof next to the chat updates as it goes; its buttons and the / commands act at once."));
   $("messages").append(welcome);
 }
 
@@ -468,28 +521,86 @@ async function sendMessage(text) {
   const message = (text || $("chat-input").value).trim();
   if (!message || !state.projectId) return;
   $("chat-input").value = "";
-  const projectId = state.projectId;
-  state.waiting += 1;
-  spinnerText(thinking, "Thinking…");
-  $("messages").append(thinking);
-  scrollChat();
+  hideCommands();
+  state.sent.push(message);
+  if (message.startsWith("/")) return runCommand(message);
   try {
-    // Your line and the reply also arrive over the WebSocket; addLine shows each line once.
-    const answer = await post(`/api/projects/${projectId}/chat`, { message, looking_at: state.focus });
-    if (state.projectId !== projectId) return;
-    state.ws = answer.workspace;
-    answer.entries.forEach(addLine);
-    state.project.notes = (await get(`/api/projects/${projectId}`)).notes;
+    // The server sends your line, the assistant's steps and the proof's updates over the WebSocket.
+    addLine((await post(`/api/projects/${state.projectId}/chat`, { message, looking_at: state.focus })).entry);
+    scrollChat();
   } catch (e) {
     notice("Couldn't send: " + e.message, "error");
-  } finally {
-    state.waiting -= 1;
-    if (!state.waiting) thinking.remove();
-    if (state.projectId === projectId) {
-      render();
-      scrollChat();
-    }
   }
+}
+
+async function refreshNotes() {
+  try {
+    state.project.notes = (await get(`/api/projects/${state.projectId}`)).notes;
+    renderNotes();
+  } catch (e) { /* shown again on the next change */ }
+}
+
+// Stop everything: the assistant's work and the running job (also the Esc key).
+function stopAll() {
+  if (!state.projectId || !(agentWorking() || (state.ws && state.ws.busy))) return;
+  attempt(post(`/api/projects/${state.projectId}/stop`));
+  notice("Stopping…");
+}
+
+// ---------- slash commands: act at once, without asking the assistant ----------
+
+const COMMANDS = [
+  { name: "/prove", args: "[goal]", help: "prove a goal (its lemmas first)", run: (g) => goalAction(g, "prove") },
+  { name: "/search", args: "[goal]", help: "let the automatic search prove a goal", run: (g) => goalAction(g, "auto") },
+  { name: "/assume", args: "[goal]", help: "assume a lemma for now", run: (g) => applyWorkspace(goalAction(g, "assume", { on: true })) },
+  { name: "/open", args: "[goal]", help: "open a goal in the proof panel", run: (g) => zoom(g) },
+  { name: "/stop", args: "", help: "stop the assistant and the running job", run: () => stopAll() },
+  { name: "/finish", args: "", help: "final Lean check of the whole proof", run: () => finishProof() },
+  { name: "/hint", args: "text", help: "a hint for every later plan and proof attempt", run: null },
+];
+
+async function runCommand(line) {
+  const [name, ...rest] = line.split(/\s+/);
+  const argument = rest.join(" ");
+  const command = COMMANDS.find((c) => c.name === name);
+  if (!command) {
+    notice(`Unknown command ${name}. Commands: ${COMMANDS.map((c) => c.name).join(", ")}`, "error");
+    return;
+  }
+  if (name === "/hint") {
+    const notes = [...(state.project.notes || []), argument].filter(Boolean);
+    state.project.notes = (await attempt(post(`/api/projects/${state.projectId}/notes`, { notes })))?.notes || state.project.notes;
+    renderNotes();
+    return;
+  }
+  const goalName = command.args ? (argument || state.focus) : "";
+  if (command.args && !state.ws.goals[goalName]) {
+    notice(`There is no goal called ${goalName}.`, "error");
+    return;
+  }
+  await attempt(Promise.resolve(command.run(goalName)));
+}
+
+function showCommands() {
+  const text = $("chat-input").value;
+  const menu = $("commands");
+  if (!text.startsWith("/") || text.includes(" ")) return hideCommands();
+  const matches = COMMANDS.filter((c) => c.name.startsWith(text));
+  menu.innerHTML = "";
+  matches.forEach((c) => {
+    const item = button("", () => {
+      $("chat-input").value = c.name + " ";
+      $("chat-input").focus();
+      hideCommands();
+    }, "command");
+    item.append(el("b", "", c.name), el("span", "args", c.args), el("span", "help", c.help));
+    menu.append(item);
+  });
+  menu.classList.toggle("hidden", !matches.length);
+}
+
+function hideCommands() {
+  $("commands").classList.add("hidden");
 }
 
 // On narrow screens the chat and the proof are two tabs.
@@ -1032,15 +1143,24 @@ window.addEventListener("DOMContentLoaded", () => {
   $("approve-btn").onclick = approve;
 
   $("chat-form").onsubmit = (e) => { e.preventDefault(); sendMessage(); };
+  $("chat-input").addEventListener("input", showCommands);
   $("chat-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+    if (e.key === "ArrowUp" && !$("chat-input").value && state.sent.length) {
+      e.preventDefault();
+      $("chat-input").value = state.sent[state.sent.length - 1];
+    }
+  });
+  $("agent-stop").onclick = stopAll;
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { hideCommands(); stopAll(); }
   });
   document.querySelectorAll("#suggestions .chip").forEach((chip) => { chip.onclick = () => sendMessage(chip.dataset.q); });
   $("show-chat").onclick = () => showSide("chat");
   $("show-proof").onclick = () => showSide("proof");
   $("tab-tree").onclick = () => showProofTab("tree");
   $("tab-final").onclick = () => showProofTab("final");
-  $("stop-btn").onclick = () => attempt(post(`/api/projects/${state.projectId}/stop`));
+  $("stop-btn").onclick = stopAll;
   $("finish-btn").onclick = finishProof;
   $("copy-btn").onclick = copyProof;
 

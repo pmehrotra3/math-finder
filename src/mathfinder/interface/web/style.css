@@ -402,3 +402,22 @@ pre .cm { color: var(--cm); font-style: italic; }
 /* KaTeX hides accessible text with position: absolute; keep it inside the panel that scrolls,
    or it stretches the whole page. */
 .project-list, .messages, .proof-pane, .new-view, .project-title { position: relative; }
+
+/* the assistant at work, and the slash-command menu */
+.agent-status {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; border-radius: 10px;
+  background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 500;
+}
+.agent-status .btn { margin-left: auto; }
+.kbd-hint { font: 11px var(--mono); color: var(--muted); border: 1px solid var(--line-strong); border-radius: 5px; padding: 0 5px; margin-left: auto; }
+.kbd-hint + .btn { margin-left: 0; }
+.did-lean { margin: 2px 0 2px 0; padding: 8px 10px; font-size: 12px; max-height: 14em; }
+.commands { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); padding: 4px; }
+.command { display: grid; grid-template-columns: 76px 64px minmax(0, 1fr); gap: 8px; align-items: baseline; text-align: left; border: 0; background: none; color: var(--ink); padding: 6px 10px; border-radius: 8px; cursor: pointer; font: 13px var(--sans); }
+.command:hover, .command:focus-visible { background: var(--accent-soft); }
+.command b { font: 600 13px var(--mono); }
+.command .args { color: var(--faint); font: 12px var(--mono); }
+.command .help { color: var(--muted); }
+.did-item b { display: inline-flex; align-items: center; gap: 6px; }
+.did-item.running b { color: var(--accent); }
+.did-item .spinner { width: 11px; height: 11px; }

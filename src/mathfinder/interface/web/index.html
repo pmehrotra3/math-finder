@@ -110,15 +110,21 @@
         <section class="chat" id="chat-pane" aria-label="Chat with the assistant">
           <div id="messages" class="messages"></div>
           <div class="chat-foot">
+            <div id="agent-status" class="agent-status hidden">
+              <span class="spinner"></span><span id="agent-text">Thinking…</span>
+              <span class="kbd-hint">Esc</span>
+              <button id="agent-stop" class="btn danger tiny">Stop</button>
+            </div>
+            <div id="commands" class="commands hidden"></div>
             <div class="suggestions" id="suggestions">
-              <button class="chip" data-q="Suggest a plan for the theorem and use it.">Make a plan</button>
-              <button class="chip" data-q="Prove it.">Prove it</button>
+              <button class="chip" data-q="Make a plan for the theorem, then prove it. Fix what Lean rejects.">Plan and prove it</button>
+              <button class="chip" data-q="Try to prove the open goal yourself, writing the Lean proof.">Write the proof</button>
               <button class="chip" data-q="Why is this true, informally?">Why is it true?</button>
               <button class="chip" data-q="What does the last Lean error mean, and how could we fix it?">Explain the error</button>
             </div>
             <form id="chat-form" class="chat-form">
               <textarea id="chat-input" rows="2" spellcheck="false"
-                        placeholder="Discuss the proof, or tell the assistant what to do: “stop, try induction on n”…"></textarea>
+                        placeholder="Discuss the proof, or tell the assistant what to do. Type / for commands."></textarea>
               <button class="btn primary send" id="send-btn" aria-label="Send"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
             </form>
           </div>

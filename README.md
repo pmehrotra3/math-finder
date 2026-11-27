@@ -18,11 +18,16 @@ your computer, and each one is its own space: **a chat on one side, the proof on
 1. **Write** the theorem in LaTeX (*New project*), for example *for every integer n, 6 divides n³ − n*.
 2. **Confirm** the Lean version. It is translated back into LaTeX without seeing your text, so you can check
    that it says what you meant.
-3. **Work on it together.** In the chat you can discuss the math ("why is this lemma true?") or tell the assistant
-   what to do: "make a plan with one lemma per case and prove it", "stop, and try induction on n instead",
-   "assume step_two for now". It changes the proof only when you ask, says what it did under its reply, and
-   what the proof reports ("case_even: proved") appears in the chat as it happens. Your hints are kept and given
-   to every later plan and proof attempt.
+3. **Work on it together.** In the chat you can discuss the math ("why is this lemma true?") or give the
+   assistant a task: "make a plan with one lemma per case and prove it", "write the proof by induction",
+   "stop, and try AM-GM instead". Like a coding agent, it works in steps: it acts, waits for Lean, reads Lean's
+   answer, fixes what was rejected, and goes on until the task is done, saying under each reply what it did.
+   - **Steer it** by writing while it works; it reads your message at its next step.
+   - **Stop it** with Esc or the Stop button.
+   - **Act directly** with `/` commands (`/prove step_one`, `/search`, `/hint ...`, `/finish`), which run at once.
+
+   What the proof reports ("case_even: proved") appears in the chat as it happens, and your hints are given to
+   every later plan and proof attempt.
 
    The proof panel shows the same work, and every button there does what the chat can do:
    - **Plan.** Ask for plans, or write your own. A plan is an idea, a list of lemmas, and a short Lean proof
@@ -87,10 +92,11 @@ src/mathfinder/
 ├── interface/           what you use
 │   ├── cli.py             command line
 │   ├── server.py          web server
+│   ├── live.py            an open project: saving, jobs, the chat and the assistant's steps
 │   └── web/               web page
 ├── projects.py          saved projects, and the established results they share
 ├── benchmark/           the test problems, and how many it solves
-├── assistant.py         the chat: answers you, and acts on the proof when you ask
+├── assistant.py         the assistant in the chat: what it is told, and how its answer is read
 └── llm.py               talks to Claude
 
 lean/                    pinned versions of Lean, Mathlib and the REPL
