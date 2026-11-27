@@ -1,42 +1,49 @@
 // Math Finder web page. Talks to interface/server.py: REST for actions, a WebSocket for live changes.
 //
-// Every theorem is a PROJECT, saved on the server; the home page lists them.
-// 1. Write   - you type a theorem in LaTeX.
-// 2. Confirm - it is translated into Lean; you check that it says what you mean.
-// 3. Plan & prove - the workspace: the theorem and its lemmas as a tree. You zoom in on one goal,
-//    make or edit its plan, prove it, or ask the side assistant a question.
-// 4. Proof   - the whole tree goes through Lean's final check and is explained.
+// The page is laid out like a chat app:
+//   left    your projects. Every theorem is a project, saved on the server.
+//   right   the open project, its own space with two sides:
+//           - the CHAT: discuss the proof with the assistant, or tell it what to do
+//             ("stop, try induction on n"). What the proof itself reports appears here too.
+//           - the PROOF: the theorem and its lemmas as a tree. Zoom in on one goal to see its
+//             Lean and LaTeX, make or edit its plan, prove it; the final proof once it is checked.
+// A new project starts on its own page: write the theorem in LaTeX, then confirm its Lean.
 
 const $ = (id) => document.getElementById(id);
 
 const state = {
-  latex: "",          // the theorem as you wrote it
+  projects: [],       // the list on the left
+  latex: "",          // the theorem being written on the new-project page
   projectId: null,    // the open project
-  project: null,      // {id, title, latex, established, conversation, result}
+  project: null,      // {id, title, latex, established, conversation, notes, result}
   library: null,      // established results the open project may cite (loaded when needed)
   choosing: null,     // the goal for which you are choosing an established result
   ws: null,           // the workspace from the server: {root, goals: {name: goal}, busy}
-  focus: "main",      // the goal you are looking at (zoomed in on)
+  focus: "main",      // the goal open in the proof panel (zoomed in on)
   options: {},        // plans the model proposed, per goal: {name: [option, ...]}
   editing: null,      // the plan being edited: {goal, sketch, main_proof, lemmas: [{name, lean}]}
-  activity: 0,
+  shown: new Set(),   // ids of the chat lines already on screen
+  attempts: 0,        // proof attempts Lean checked in the running job
+  waiting: 0,         // chat messages still waiting for the assistant's reply
 };
 
 // ---------- talking to the server ----------
 
-async function post(path, body = {}) {
+async function request(method, path, body) {
   const response = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    method,
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail || response.statusText);
   return data;
 }
+const get = (path) => request("GET", path);
+const post = (path, body = {}) => request("POST", path, body);
 
-function action(name, body = {}) {
-  return post(`/api/sessions/${state.sessionId}/${name}`, body);
+function goalAction(name, action, body = {}) {
+  return post(`/api/projects/${state.projectId}/goals/${encodeURIComponent(name)}/${action}`, body);
 }
 
 // ---------- small helpers ----------
@@ -45,9 +52,9 @@ function escapeHtml(text) {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function renderMath(el) {
+function renderMath(node) {
   if (window.renderMathInElement) {
-    renderMathInElement(el, {
+    renderMathInElement(node, {
       delimiters: [
         { left: "$$", right: "$$", display: true },
         { left: "$", right: "$", display: false },
@@ -57,14 +64,14 @@ function renderMath(el) {
   }
 }
 
-function showText(el, text) {
-  el.textContent = text;
-  renderMath(el);
+function showText(node, text) {
+  node.textContent = text;
+  renderMath(node);
 }
 
 // Markdown would mangle LaTeX (it treats _ and \ specially), so we hide the math first,
 // let marked do the Markdown, put the math back, and let KaTeX draw it.
-function renderMarkdown(el, text) {
+function renderMarkdown(node, text) {
   const math = [];
   const hidden = text.replace(/\$\$[\s\S]+?\$\$|\$[^$\n]+?\$/g, (m) => {
     math.push(m);
@@ -72,8 +79,8 @@ function renderMarkdown(el, text) {
   });
   let html = window.marked ? marked.parse(escapeHtml(hidden)) : `<pre>${escapeHtml(hidden)}</pre>`;
   html = html.replace(/@@MATH(\d+)@@/g, (_, i) => escapeHtml(math[Number(i)]));
-  el.innerHTML = html;
-  renderMath(el);
+  node.innerHTML = html;
+  renderMath(node);
 }
 
 // A light touch of Lean highlighting: keywords and comments.
@@ -90,21 +97,6 @@ function highlightLean(code) {
     .join("\n");
 }
 
-const STEPS = ["write", "confirm", "workspace", "proof"];
-function setStep(step) {
-  const now = STEPS.indexOf(step);
-  document.querySelectorAll("#stepper li").forEach((li) => {
-    const i = STEPS.indexOf(li.dataset.step);
-    li.classList.toggle("done", i < now);
-    li.classList.toggle("current", i === now);
-  });
-}
-
-function reveal(id) {
-  $(id).classList.remove("hidden");
-  $(id).scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -118,61 +110,141 @@ function button(label, onClick, className = "btn") {
   return b;
 }
 
-function busy(el, text) {
-  el.innerHTML = text ? `<span class="spinner"></span><span></span>` : "";
-  if (text) el.lastChild.textContent = text;
+function spinnerText(node, text) {
+  node.innerHTML = text ? `<span class="spinner"></span><span></span>` : "";
+  if (text) node.lastChild.textContent = text;
+}
+
+function timeAgo(seconds) {
+  const minutes = Math.round((Date.now() / 1000 - seconds) / 60);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 60 * 24) return `${Math.round(minutes / 60)} h ago`;
+  return new Date(seconds * 1000).toLocaleDateString();
 }
 
 // ---------- theme ----------
-
-function setTheme(theme) {
-  document.documentElement.dataset.theme = theme;
-  try { localStorage.setItem("mf-theme", theme); } catch (e) { /* storage may be blocked */ }
-}
 
 function toggleTheme() {
   const dark = document.documentElement.dataset.theme
     ? document.documentElement.dataset.theme === "dark"
     : matchMedia("(prefers-color-scheme: dark)").matches;
-  setTheme(dark ? "light" : "dark");
+  document.documentElement.dataset.theme = dark ? "light" : "dark";
+  try { localStorage.setItem("mf-theme", document.documentElement.dataset.theme); } catch (e) { /* blocked */ }
 }
 
-// ---------- step 1: write the theorem ----------
+// ---------- which page is showing: #new or #project=<id> ----------
+
+function route() {
+  const opened = location.hash.match(/project=([0-9a-f]+)/);
+  closeSidebar();
+  if (opened) {
+    if (opened[1] !== state.projectId) openProjectById(opened[1]);
+  } else {
+    showNewProject();
+  }
+}
+
+function showView(name) {
+  $("view-new").classList.toggle("hidden", name !== "new");
+  $("view-project").classList.toggle("hidden", name !== "project");
+}
+
+function openSidebar() { $("app").classList.add("sidebar-open"); }
+function closeSidebar() { $("app").classList.remove("sidebar-open"); }
+
+// ---------- left: the projects ----------
+
+const PROJECT_STATUS = {
+  established: "established", proved: "proved", working: "working", stuck: "stuck", assumed: "assumed", open: "open",
+};
+
+async function loadProjects() {
+  try {
+    state.projects = (await get("/api/projects")).projects;
+  } catch (e) {
+    return;
+  }
+  renderProjects();
+}
+
+function renderProjects() {
+  const list = $("project-list");
+  list.innerHTML = "";
+  if (!state.projects.length) {
+    list.append(el("p", "sidebar-empty", "No projects yet. Write a theorem to start one."));
+    return;
+  }
+  state.projects.forEach((p) => {
+    const item = el("a", "project-item" + (p.id === state.projectId ? " current" : ""));
+    item.href = `#project=${p.id}`;
+    const title = el("span", "project-item-title math");
+    showText(title, p.title);
+    const meta = el("span", "project-item-meta");
+    meta.append(el("i", "dot " + (p.status === "established" ? "proved" : p.status)),
+                document.createTextNode(`${PROJECT_STATUS[p.status] || p.status} · ${timeAgo(p.updated)}`));
+    const remove = button("×", (e) => { e.preventDefault(); deleteProject(p); }, "project-delete");
+    remove.title = "Delete this project";
+    remove.setAttribute("aria-label", "Delete this project");
+    item.append(title, meta, remove);
+    list.append(item);
+  });
+}
+
+async function deleteProject(p) {
+  if (!confirm(`Delete this project? This cannot be undone.\n\n${p.title}`)) return;
+  try {
+    await request("DELETE", `/api/projects/${p.id}`);
+  } catch (e) {
+    alert("Couldn't delete it: " + e.message);
+    return;
+  }
+  if (p.id === state.projectId) location.hash = "new";
+  loadProjects();
+}
+
+// ---------- a new project: write the theorem, then confirm its Lean ----------
+
+function showNewProject() {
+  closeProject();
+  showView("new");
+  renderProjects();
+  updatePreview();
+  $("latex").focus();
+}
 
 function updatePreview() {
   const text = $("latex").value.trim();
   if (text) showText($("preview"), text);
-  else $("preview").innerHTML = '<span class="field-label">Your theorem appears here</span>';
+  else $("preview").innerHTML = '<span class="muted-text">Your theorem appears here</span>';
 }
 
 async function formalize() {
   state.latex = $("latex").value.trim();
   if (!state.latex) return;
   $("formalize-btn").disabled = true;
-  busy($("formalize-status"), "Translating to Lean and checking it…");
+  spinnerText($("formalize-status"), "Translating to Lean and checking it…");
   try {
     const f = await post("/api/formalize", { latex: state.latex });
     if (!f.ok) {
       $("formalize-status").textContent = "Lean couldn't accept any translation: " + (f.errors[0] || "");
       return;
     }
-    busy($("formalize-status"), "");
+    spinnerText($("formalize-status"), "");
     $("statement").value = f.statement;
     showText($("back"), f.back_translation);
     const v = $("verdict");
     v.className = "notice " + (f.faithful ? "ok" : "warn");
     v.textContent = (f.faithful ? "✓ Same meaning. " : "⚠ The meaning may differ. ") + f.judgment;
     $("check-errors").classList.add("hidden");
-    setStep("confirm");
-    reveal("step-approve");
+    $("confirm").classList.remove("hidden");
+    $("confirm").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (e) {
     $("formalize-status").textContent = "Error: " + e.message;
   } finally {
     $("formalize-btn").disabled = false;
   }
 }
-
-// ---------- step 2: confirm ----------
 
 async function checkEdit() {
   const box = $("check-errors");
@@ -190,7 +262,8 @@ async function approve() {
   $("approve-btn").disabled = true;
   try {
     const project = await post("/api/projects", { statement: $("statement").value, latex: state.latex });
-    openProject(project);
+    $("confirm").classList.add("hidden");
+    location.hash = `project=${project.id}`;  // route() opens it
   } catch (e) {
     $("check-errors").className = "notice bad";
     $("check-errors").textContent = "Error: " + e.message;
@@ -199,159 +272,265 @@ async function approve() {
   }
 }
 
-// ---------- step 3: the workspace ----------
+// ---------- one project ----------
 
-// ---------- projects ----------
-
-async function get(path) {
-  const response = await fetch(path);
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.detail || response.statusText);
-  return data;
-}
-
-async function loadProjects() {
-  const { projects } = await get("/api/projects");
-  const list = $("project-list");
-  list.innerHTML = "";
-  $("projects-panel").classList.toggle("hidden", projects.length === 0);
-  projects.forEach((p) => {
-    const card = el("div", "project-card" + (p.status === "established" ? " established" : ""));
-    const title = el("div", "title math");
-    showText(title, p.title);
-    const meta = el("div", "meta");
-    meta.append(el("span", "", `${p.lemmas} lemma${p.lemmas === 1 ? "" : "s"}`),
-                el("span", "", `changed ${timeAgo(p.updated)}`));
-    if (p.uses.length) meta.append(el("span", "", `builds on ${p.uses.length} project${p.uses.length === 1 ? "" : "s"}`));
-    const buttons = el("div", "buttons");
-    buttons.append(button("Open", () => openProjectById(p.id), "btn tiny primary"));
-    buttons.append(button("Delete", () => deleteProject(p), "btn tiny danger"));
-    card.append(statusBadgeFor(p.status), title, meta, buttons);
-    list.append(card);
-  });
-}
-
-function statusBadgeFor(status) {
-  const text = { established: "established", proved: "proved, not yet checked as a whole" }[status] || STATUS_TEXT[status] || status;
-  const badge = el("span", "badge " + status, text);
-  badge.style.alignSelf = "flex-start";
-  return badge;
-}
-
-function timeAgo(seconds) {
-  const minutes = Math.round((Date.now() / 1000 - seconds) / 60);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes} min ago`;
-  if (minutes < 60 * 24) return `${Math.round(minutes / 60)} h ago`;
-  return new Date(seconds * 1000).toLocaleDateString();
-}
-
-async function deleteProject(p) {
-  if (!confirm(`Delete this project? This cannot be undone.\n\n${p.title}`)) return;
-  try {
-    await fetch(`/api/projects/${p.id}`, { method: "DELETE" }).then(async (r) => {
-      if (!r.ok) throw new Error((await r.json()).detail);
-    });
-  } catch (e) {
-    alert("Couldn't delete it: " + e.message);
-  }
-  loadProjects();
-}
+let socket = null;
 
 async function openProjectById(id) {
   try {
     openProject(await get(`/api/projects/${id}`));
   } catch (e) {
     alert("Couldn't open the project: " + e.message);
-    location.hash = "";
+    location.hash = "new";
   }
 }
 
-let socket = null;
+function closeProject() {
+  if (socket) { socket.close(); socket = null; }
+  Object.assign(state, { projectId: null, project: null, ws: null });
+}
 
 function openProject(project) {
+  closeProject();
   Object.assign(state, {
     projectId: project.id, project, ws: project.workspace, focus: "main", options: {}, editing: null,
-    activity: 0, library: null, choosing: null, latex: project.latex,
+    library: null, choosing: null, shown: new Set(), attempts: 0,
   });
-  location.hash = `project=${project.id}`;
-  $("activity").innerHTML = "";
-  $("activity-count").textContent = "";
-  $("conversation").innerHTML = "";
-  project.conversation.forEach(([question, answer]) => {
-    $("conversation").append(el("div", "bubble you", question));
-    const bubble = el("div", "bubble assistant");
-    renderMarkdown(bubble, answer);
-    $("conversation").append(bubble);
-  });
-  ["step-input", "projects-panel", "step-approve", "step-result"].forEach((id) => $(id).classList.add("hidden"));
-  setStep("workspace");
+  showView("project");
+  showText($("project-title"), project.title);
+  $("messages").innerHTML = "";
+  project.conversation.forEach(addLine);
+  showResult(project.result);
+  showProofTab("tree");
+  showSide("chat");
   render();
-  reveal("step-workspace");
-  if (project.result && project.result.proved) showResult(project.result, false);
+  renderProjects();
+  scrollChat();
 
-  if (socket) socket.close();
   const protocol = location.protocol === "https:" ? "wss" : "ws";
   socket = new WebSocket(`${protocol}://${location.host}/ws/${project.id}`);
   socket.onmessage = (message) => handleEvent(JSON.parse(message.data));
 }
 
-function goHome() {
-  if (socket) { socket.close(); socket = null; }
-  Object.assign(state, { projectId: null, project: null, ws: null });
-  location.hash = "";
-  ["step-approve", "step-workspace", "step-result"].forEach((id) => $(id).classList.add("hidden"));
-  $("step-input").classList.remove("hidden");
-  setStep("write");
-  loadProjects();
-  window.scrollTo({ top: 0, behavior: "smooth" });
-}
-
-async function loadLibrary() {
-  if (!state.library) state.library = (await get(`/api/projects/${state.projectId}/library`)).results;
-  return state.library;
-}
-
-function goalAction(name, action, body = {}) {
-  return post(`/api/projects/${state.projectId}/goals/${encodeURIComponent(name)}/${action}`, body);
-}
-
 function handleEvent(e) {
   if (e.workspace) state.ws = e.workspace;
   switch (e.kind) {
-    case "log":
-      addActivity(e.text);
+    case "chat":
+      addLine(e.entry);
+      scrollChat();
       break;
     case "attempt":
-      addActivity(`${e.ok ? "✓" : "✗"} proof attempt for ${e.name}${e.source ? ` (${e.source})` : ""}`);
+      state.attempts += 1;
       break;
     case "error":
-      addActivity(e.text, "error");
+      notice(e.text, "error");
+      break;
+    case "idle":
+      state.attempts = 0;
+      loadProjects();
       break;
     case "finished":
       state.project.result = e.result;
       if (e.established) state.project.established = true;
       showResult(e.result);
+      showProofTab("final");
+      loadProjects();
       break;
   }
   render();
 }
 
-function addActivity(text, className = "") {
-  const li = el("li", className);
-  li.append(el("time", "", new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })), el("span", "", text));
-  $("activity").prepend(li);
-  state.activity += 1;
-  $("activity-count").textContent = state.activity;
+function render() {
+  if (!state.ws) return;
+  if (!state.ws.goals[state.focus]) state.focus = "main";
+  renderHead();
+  renderNotes();
+  renderBreadcrumb();
+  renderOutline();
+  renderFocus();
 }
 
-// Run a request; show its error in the activity list instead of failing silently.
+function renderHead() {
+  const busyNow = state.ws.busy;
+  const root = goal("main");
+  const status = state.project.established ? "established" : root.status;
+  $("project-status").replaceChildren(statusBadgeFor(status, root));
+  $("job").classList.toggle("hidden", !busyNow);
+  const working = Object.values(state.ws.goals).find((g) => g.status === "working");
+  const what = working ? `Working on ${working.name === "main" ? "the theorem" : working.name}` : "Working";
+  $("job-text").textContent = what + (state.attempts ? ` · ${state.attempts} attempts checked` : "") + "…";
+  $("stop-btn").classList.toggle("hidden", !busyNow);
+  $("finish-btn").disabled = busyNow || root.status !== "proved" || root.assumes.length > 0;
+}
+
+function statusBadgeFor(status, g) {
+  if (status === "established") return el("span", "badge established", "established");
+  if (g && status === "proved" && g.assumes.length) return el("span", "badge assumed", "proved, with assumptions");
+  return el("span", "badge " + status, STATUS_TEXT[status] || status);
+}
+
+// ---------- the chat ----------
+
+const ACTION_TEXT = {
+  stop: "Stop", note: "Hint", clear_notes: "Hints", prove: "Prove", search: "Search", plan: "Plan",
+  clear_plan: "Plan", statement: "Statement", assume: "Assume", cite: "Cite", finish: "Final check",
+};
+
+function addLine(entry) {
+  if (entry.id && state.shown.has(entry.id)) return;
+  if (entry.id) state.shown.add(entry.id);
+  const box = $("messages");
+  box.querySelector(".chat-welcome")?.remove();
+
+  if (entry.role === "event") {
+    // Updates from the proof are small lines; consecutive ones are grouped.
+    let group = [...box.children].filter((c) => c !== thinking).pop();
+    if (!group || !group.classList.contains("events")) {
+      group = el("div", "events");
+      box.append(group);
+    }
+    const line = el("div", "event" + (entry.kind === "error" ? " error" : ""));
+    line.append(el("i", "event-dot " + eventKind(entry.text)), el("span", "", entry.text));
+    group.append(line);
+    foldEvents(group);
+    if (state.waiting) box.append(thinking);
+    return;
+  }
+
+  const bubble = el("div", "msg " + entry.role);
+  if (entry.role === "you") {
+    bubble.textContent = entry.text;
+  } else {
+    const body = el("div", "msg-body");
+    renderMarkdown(body, entry.text || "");
+    bubble.append(body);
+    if (entry.actions && entry.actions.length) {
+      const done = el("div", "did");
+      entry.actions.forEach((a) => {
+        const chip = el("div", "did-item " + (a.ok ? "ok" : "bad"));
+        chip.append(el("b", "", (a.ok ? "✓ " : "✕ ") + (ACTION_TEXT[a.do] || a.do)), el("span", "", a.text));
+        done.append(chip);
+      });
+      bubble.append(done);
+    }
+  }
+  box.append(bubble);
+  if (state.waiting) box.append(thinking);
+}
+
+function eventKind(text) {
+  if (/proved|passed|established/.test(text)) return "ok";
+  if (/stuck|failed|refuted|error|doesn't/i.test(text)) return "bad";
+  return "";
+}
+
+// A long run of updates shows its last few lines; the rest folds away.
+function foldEvents(group) {
+  const lines = [...group.querySelectorAll(":scope > .event, :scope > details .event")];
+  if (lines.length <= 4) return;
+  let details = group.querySelector(":scope > details");
+  if (!details) {
+    details = el("details", "older");
+    details.append(el("summary"));
+    group.prepend(details);
+  }
+  const visible = [...group.querySelectorAll(":scope > .event")];
+  visible.slice(0, visible.length - 3).forEach((line) => details.append(line));
+  const hidden = details.querySelectorAll(".event").length;
+  details.querySelector("summary").textContent = `${hidden} earlier update${hidden === 1 ? "" : "s"}`;
+}
+
+// A message on this page only (not saved): an error from a button, say.
+function notice(text, kind = "") {
+  addLine({ role: "event", text, kind });
+  scrollChat();
+}
+
+function scrollChat() {
+  const box = $("messages");
+  if (!box.children.length) showWelcome();
+  box.scrollTop = box.scrollHeight;
+}
+
+function showWelcome() {
+  const welcome = el("div", "chat-welcome");
+  welcome.append(el("h3", "", "Work on this proof together"));
+  welcome.append(el("p", "", "Ask about the math, or tell the assistant what to do: make a plan, prove a lemma, " +
+    "stop and try another idea. It changes the proof only when you ask, and Lean checks every step. " +
+    "The proof next to the chat updates as it goes; you can also use its buttons yourself."));
+  $("messages").append(welcome);
+}
+
+// "Thinking…" while the assistant writes its reply; always the last thing in the chat.
+const thinking = el("div", "msg assistant thinking");
+
+async function sendMessage(text) {
+  const message = (text || $("chat-input").value).trim();
+  if (!message || !state.projectId) return;
+  $("chat-input").value = "";
+  const projectId = state.projectId;
+  state.waiting += 1;
+  spinnerText(thinking, "Thinking…");
+  $("messages").append(thinking);
+  scrollChat();
+  try {
+    // Your line and the reply also arrive over the WebSocket; addLine shows each line once.
+    const answer = await post(`/api/projects/${projectId}/chat`, { message, looking_at: state.focus });
+    if (state.projectId !== projectId) return;
+    state.ws = answer.workspace;
+    answer.entries.forEach(addLine);
+    state.project.notes = (await get(`/api/projects/${projectId}`)).notes;
+  } catch (e) {
+    notice("Couldn't send: " + e.message, "error");
+  } finally {
+    state.waiting -= 1;
+    if (!state.waiting) thinking.remove();
+    if (state.projectId === projectId) {
+      render();
+      scrollChat();
+    }
+  }
+}
+
+// On narrow screens the chat and the proof are two tabs.
+function showSide(name) {
+  $("split").dataset.side = name;
+  $("show-chat").classList.toggle("active", name === "chat");
+  $("show-proof").classList.toggle("active", name === "proof");
+}
+
+// ---------- the proof panel ----------
+
+function showProofTab(name) {
+  $("tab-tree").classList.toggle("active", name === "tree");
+  $("tab-final").classList.toggle("active", name === "final");
+  $("pane-tree").classList.toggle("hidden", name !== "tree");
+  $("pane-final").classList.toggle("hidden", name !== "final");
+  $("breadcrumb").classList.toggle("hidden", name !== "tree");
+}
+
+function renderNotes() {
+  const box = $("notes");
+  const notes = state.ws && state.project ? (state.project.notes || []) : [];
+  box.classList.toggle("hidden", !notes.length);
+  box.innerHTML = "";
+  if (!notes.length) return;
+  box.append(el("span", "field-label", "Your hints"));
+  notes.forEach((n) => box.append(el("span", "note-chip", n)));
+  box.append(button("Clear", async () => {
+    try {
+      state.project.notes = (await post(`/api/projects/${state.projectId}/notes`, { notes: [] })).notes;
+    } catch (e) { notice(e.message, "error"); }
+    render();
+  }, "btn tiny"));
+}
+
+// Run a request; show its error in the chat instead of failing silently.
 async function attempt(promise) {
   try {
     return await promise;
   } catch (e) {
-    addActivity(e.message, "error");
-    showTab("activity");
+    notice(e.message, "error");
     return null;
   }
 }
@@ -375,18 +554,12 @@ function pathTo(name) {
 function zoom(name) {
   state.focus = name;
   state.editing = null;
+  showProofTab("tree");
   render();
+  $("proof-pane").scrollTop = 0;
 }
 
-function render() {
-  if (!state.ws) return;
-  if (!state.ws.goals[state.focus]) state.focus = "main";
-  renderBar();
-  renderOutline();
-  renderFocus();
-}
-
-function renderBar() {
+function renderBreadcrumb() {
   const crumbs = $("breadcrumb");
   crumbs.innerHTML = "";
   pathTo(state.focus).forEach((name, i, path) => {
@@ -394,11 +567,6 @@ function renderBar() {
     const label = name === "main" ? "Theorem" : name;
     crumbs.append(i === path.length - 1 ? el("span", "here", label) : button(label, () => zoom(name), ""));
   });
-  const busyNow = state.ws.busy;
-  $("job").classList.toggle("hidden", !busyNow);
-  $("stop-btn").classList.toggle("hidden", !busyNow);
-  const root = goal("main");
-  $("finish-btn").disabled = busyNow || root.status !== "proved" || root.assumes.length > 0;
 }
 
 function renderOutline() {
@@ -407,7 +575,7 @@ function renderOutline() {
   const walk = (name, depth) => {
     const g = goal(name);
     const b = button("", () => zoom(name), name === state.focus ? "selected" : "");
-    b.style.paddingLeft = `${8 + depth * 14}px`;
+    b.style.paddingLeft = `${8 + depth * 16}px`;
     b.append(el("i", "dot " + g.status), el("span", "", name === "main" ? "Theorem" : name));
     b.title = `${name}: ${g.status}`;
     const li = el("li");
@@ -423,8 +591,7 @@ const STATUS_TEXT = {
 };
 
 function statusBadge(g) {
-  const text = g.status === "proved" && g.assumes.length ? "proved, with assumptions" : STATUS_TEXT[g.status];
-  return el("span", "badge " + (g.status === "proved" && g.assumes.length ? "assumed" : g.status), text);
+  return statusBadgeFor(g.status, g);
 }
 
 function leanCode(name, statement) {
@@ -442,7 +609,7 @@ function renderFocus() {
   // --- heading
   const head = el("div", "goal-head");
   head.append(el("span", "kicker", g.name === "main" ? "Theorem" : "Lemma"));
-  head.append(el("span", "goal-name", g.name === "main" ? "main" : g.name), statusBadge(g));
+  head.append(el("span", "goal-name", g.name), statusBadge(g));
   const path = pathTo(g.name);
   if (path.length > 1) {
     const parent = path[path.length - 2];
@@ -515,7 +682,7 @@ function planSection(g, busyNow) {
   if (!g.children.length && !g.sketch) {
     section.append(el("p", "muted-text",
       "No plan yet. A goal can be proved directly, or split into smaller lemmas that are proved one at a time. " +
-      "Ask for suggestions or write your own."));
+      "Ask for suggestions, write your own, or ask in the chat."));
     return section;
   }
   if (g.sketch) section.append(el("p", "idea", g.sketch));
@@ -543,8 +710,9 @@ function lemmaCard(lemma, busyNow) {
   if (lemma.children.length) title.append(el("span", "muted-text", `· ${lemma.children.length} lemmas inside`));
   const latex = el("div", "lemma-latex math");
   if (lemma.latex) showText(latex, lemma.latex);
-  card.append(title, leanCode(lemma.name, lemma.lean), latex);
-  card.querySelector("code").className = "lemma-lean";
+  const code = leanCode(lemma.name, lemma.lean);
+  code.className = "lemma-lean";
+  card.append(title, code, latex);
   if (lemma.established_by) card.append(citedNote(lemma));
   if (lemma.feedback && ["stuck", "refuted"].includes(lemma.status)) card.append(el("div", "lemma-feedback", lemma.feedback));
   const buttons = el("div", "lemma-buttons");
@@ -561,13 +729,9 @@ function lemmaCard(lemma, busyNow) {
 
 async function suggestPlans(g, suggestButton) {
   suggestButton.disabled = true;
-  busy(suggestButton, "Asking for plans…");
-  addActivity(`Asking for plans for ${g.name}…`);
+  spinnerText(suggestButton, "Asking for plans…");
   const answer = await attempt(goalAction(g.name, "propose"));
-  if (answer) {
-    state.options[g.name] = answer.options;
-    addActivity(`${answer.options.length} plans proposed for ${g.name}.`);
-  }
+  if (answer) state.options[g.name] = answer.options;
   render();
 }
 
@@ -610,7 +774,6 @@ function optionsSection(g, busyNow) {
 }
 
 async function usePlan(g, plan) {
-  addActivity(`Using a plan for ${g.name}; Lean is checking it and the LaTeX is being written…`);
   const answer = await attempt(goalAction(g.name, "plan", {
     sketch: plan.sketch, main_proof: plan.main_proof,
     lemmas: plan.lemmas.map((l) => ({ name: l.name, lean: l.lean, latex: l.latex || "", established_by: l.established_by || "" })),
@@ -619,7 +782,6 @@ async function usePlan(g, plan) {
   state.ws = answer.workspace;
   delete state.options[g.name];
   state.editing = null;
-  addActivity(answer.problems.length ? `The plan for ${g.name} doesn't fit together yet.` : `Plan for ${g.name} saved; Lean says it fits.`);
   render();
   return true;
 }
@@ -679,8 +841,7 @@ function planEditor(g) {
     const results = await attempt(loadLibrary());
     if (!results) return;
     if (!results.length) {
-      addActivity("No established results yet: finish a project first.", "error");
-      showTab("activity");
+      notice("No established results yet: finish a project first.", "error");
       return;
     }
     const pick = el("select");
@@ -706,7 +867,7 @@ function planEditor(g) {
   const buttons = el("div", "goal-actions");
   const save = button("Save and check with Lean", async () => {
     save.disabled = true;
-    busy(save, "Checking…");
+    spinnerText(save, "Checking…");
     if (!(await usePlan(g, draft))) render();
   }, "btn primary");
   buttons.append(save, button("Cancel", () => { state.editing = null; render(); }));
@@ -722,10 +883,9 @@ function editStatement(g, row) {
   const save = button("Save", async () => {
     save.disabled = true;
     const answer = await attempt(goalAction(g.name, "statement", { lean: input.value }));
-    if (!answer) return;
+    if (!answer) { save.disabled = false; return; }
     if (answer.errors.length) {
-      addActivity(`Lean rejected the new statement of ${g.name}: ${answer.errors[0]}`, "error");
-      showTab("activity");
+      notice(`Lean rejected the new statement of ${g.name}: ${answer.errors[0]}`, "error");
       save.disabled = false;
       return;
     }
@@ -763,17 +923,24 @@ function attemptsSection(g) {
   return details;
 }
 
-async function applyWorkspace(request) {
-  const answer = await attempt(request);
+async function applyWorkspace(promise) {
+  const answer = await attempt(promise);
   if (answer && answer.workspace) state.ws = answer.workspace;
   render();
 }
 
 // ---------- citing established results from other projects ----------
 
+async function loadLibrary() {
+  if (!state.library) state.library = (await get(`/api/projects/${state.projectId}/library`)).results;
+  return state.library;
+}
+
 function citedNote(g) {
   const note = el("div", "cited", "✓ Established in another project · ");
-  note.append(button("open that project", () => openProjectById(g.established_by), ""));
+  const link = el("a", "", "open that project");
+  link.href = `#project=${g.established_by}`;
+  note.append(link);
   return note;
 }
 
@@ -805,7 +972,6 @@ function libraryChooser(g) {
     item.append(title, el("div", "lemma-lean", `${r.theorem} ${r.statement}`));
     item.append(button("Use it", async () => {
       state.choosing = null;
-      addActivity(`Citing an established result for ${g.name}; Lean is checking it…`);
       await applyWorkspace(goalAction(g.name, "use-established", { project: r.id }));
     }, "btn tiny primary"));
     list.append(item);
@@ -814,69 +980,25 @@ function libraryChooser(g) {
   return box;
 }
 
-// ---------- the side assistant ----------
-
-function showTab(name) {
-  ["ask", "activity"].forEach((tab) => {
-    $(`tab-${tab}`).classList.toggle("active", tab === name);
-    $(`pane-${tab}`).classList.toggle("hidden", tab !== name);
-  });
-}
-
-async function askQuestion(text) {
-  const question = (text || $("ask-input").value).trim();
-  if (!question || !state.projectId) return;
-  $("ask-input").value = "";
-  const focusNote = state.focus === "main" ? "" : ` (I am looking at ${state.focus}.)`;
-  $("conversation").append(el("div", "bubble you", question));
-  const answerBubble = el("div", "bubble assistant");
-  busy(answerBubble, "Thinking…");
-  $("conversation").append(answerBubble);
-  answerBubble.scrollIntoView({ block: "nearest" });
-  $("ask-btn").disabled = true;
-  try {
-    const { answer } = await post(`/api/projects/${state.projectId}/ask`, { question: question + focusNote });
-    renderMarkdown(answerBubble, answer);
-  } catch (e) {
-    answerBubble.textContent = "Couldn't answer: " + e.message;
-  } finally {
-    $("ask-btn").disabled = false;
-    $("conversation").scrollTop = $("conversation").scrollHeight;
-  }
-}
+// ---------- the final proof ----------
 
 async function finishProof() {
   $("finish-btn").disabled = true;
   await attempt(post(`/api/projects/${state.projectId}/finish`));
 }
 
-// ---------- step 4: the result ----------
-
-function showResult(r, scroll = true) {
+function showResult(r) {
+  $("final-empty").classList.toggle("hidden", !!r);
+  $("final").classList.toggle("hidden", !r);
+  if (!r) return;
   $("result-icon").className = "result-icon " + (r.proved ? "ok" : "bad");
   $("result-icon").textContent = r.proved ? "✓" : "✕";
   $("result-title").textContent = r.proved ? "Proved, and checked by Lean" : "The final check failed";
-  $("result-sub").textContent = r.proved ? "theorem main " + goal("main").lean : (r.message || "");
-  const lemmaCount = Object.keys(state.ws.goals).length - 1;
-  const attempts = Object.values(state.ws.goals).reduce((n, g) => n + g.attempts.length, 0);
-  const metrics = [
-    [String(lemmaCount), "lemmas"],
-    [String(Math.max(...Object.keys(state.ws.goals).map((n) => pathTo(n).length)) - 1), "levels deep"],
-    [String(attempts), "attempts Lean checked"],
-  ];
-  $("metrics").innerHTML = "";
-  metrics.forEach(([value, label]) => {
-    const tile = el("div", "metric");
-    tile.append(el("div", "v", value), el("div", "k", label));
-    $("metrics").append(tile);
-  });
+  $("result-sub").textContent = r.proved ? "theorem main " + state.ws.goals.main.lean : (r.message || "");
   if (r.explanation) renderMarkdown($("explanation"), r.explanation);
-  else $("explanation").textContent = r.message || "";
+  else $("explanation").textContent = r.proved ? "" : "Fix what Lean says above, then check again.";
   $("lean-code").innerHTML = highlightLean(r.lean_code || "(no proof)");
-  $("saved").textContent = r.folder ? `Saved in ${r.folder}/` : "";
-  setStep("proof");
-  $("step-result").classList.remove("hidden");
-  if (scroll) reveal("step-result");
+  $("saved").textContent = r.folder ? `Also saved in ${r.folder}/` : "";
 }
 
 async function copyProof() {
@@ -889,14 +1011,17 @@ async function copyProof() {
   setTimeout(() => { $("copy-btn").textContent = "Copy"; }, 1500);
 }
 
-function startOver() {
-  goHome();
-  $("latex").focus();
-}
-
 // ---------- wire up the buttons ----------
 
 window.addEventListener("DOMContentLoaded", () => {
+  try {
+    const saved = localStorage.getItem("mf-theme");
+    if (saved) document.documentElement.dataset.theme = saved;
+  } catch (e) { /* storage may be blocked */ }
+  $("theme-btn").onclick = toggleTheme;
+  $("menu-btn").onclick = openSidebar;
+  $("scrim").onclick = closeSidebar;
+
   $("latex").addEventListener("input", updatePreview);
   $("latex").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) formalize(); });
   document.querySelectorAll("#examples .chip").forEach((chip) => {
@@ -905,28 +1030,30 @@ window.addEventListener("DOMContentLoaded", () => {
   $("formalize-btn").onclick = formalize;
   $("check-btn").onclick = checkEdit;
   $("approve-btn").onclick = approve;
-  $("stop-btn").onclick = () => attempt(post(`/api/projects/${state.projectId}/stop`));
-  $("all-projects-btn").onclick = goHome;
-  $("finish-btn").onclick = finishProof;
-  $("tab-ask").onclick = () => showTab("ask");
-  $("tab-activity").onclick = () => showTab("activity");
-  $("ask-form").onsubmit = (e) => { e.preventDefault(); askQuestion(); };
-  $("ask-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); askQuestion(); }
+
+  $("chat-form").onsubmit = (e) => { e.preventDefault(); sendMessage(); };
+  $("chat-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   });
-  document.querySelectorAll("#suggestions .chip").forEach((chip) => { chip.onclick = () => askQuestion(chip.dataset.q); });
+  document.querySelectorAll("#suggestions .chip").forEach((chip) => { chip.onclick = () => sendMessage(chip.dataset.q); });
+  $("show-chat").onclick = () => showSide("chat");
+  $("show-proof").onclick = () => showSide("proof");
+  $("tab-tree").onclick = () => showProofTab("tree");
+  $("tab-final").onclick = () => showProofTab("final");
+  $("stop-btn").onclick = () => attempt(post(`/api/projects/${state.projectId}/stop`));
+  $("finish-btn").onclick = finishProof;
   $("copy-btn").onclick = copyProof;
-  $("again-btn").onclick = startOver;
-  $("theme-btn").onclick = toggleTheme;
-  try {
-    const saved = localStorage.getItem("mf-theme");
-    if (saved) document.documentElement.dataset.theme = saved;
-  } catch (e) { /* storage may be blocked */ }
-  setStep("write");
-  updatePreview();
-  const opened = location.hash.match(/project=([0-9a-f]+)/);
-  if (opened) openProjectById(opened[1]);
-  else loadProjects();
+
+  window.addEventListener("hashchange", route);
+  loadProjects();
+  route();
 });
-// KaTeX loads with `defer`, so render the preview again once it is ready.
-window.addEventListener("load", () => { updatePreview(); render(); });
+// KaTeX loads with `defer`, so draw the math again once it is ready.
+window.addEventListener("load", () => {
+  updatePreview();
+  renderProjects();
+  if (state.project) {
+    showText($("project-title"), state.project.title);
+    render();
+  }
+});

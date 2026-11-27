@@ -1,30 +1,116 @@
-"""The side assistant: answers questions while you work, without touching the proof.
+"""The project chat: you talk with the assistant while the proof develops next to it.
 
-Like asking a colleague "by the way, why does this lemma hold?" while the search keeps
-running. It sees the whole proof tree (statements, plans, what Lean said) and the last few
-questions and answers, and replies in Markdown with LaTeX. It cannot change anything; when
-it helps, it suggests a lemma or a hint that you can then add yourself.
+You can discuss the math ("why is this lemma true?"), tell it what to do ("stop, try
+induction on n instead"), or ask it to change the plan. It answers in Markdown with LaTeX
+and, when you asked for it, also ACTS on the proof. The actions it may take are the same ones
+the buttons in the proof panel offer, nothing else:
+
+  stop                        stop the running job
+  note {text}                 remember a hint; every later plan and proof attempt gets it
+  clear_notes                 forget all hints
+  prove {goal}                prove a goal (its lemmas first)
+  search {goal}               let the full automatic search prove it
+  plan {goal, sketch, lemmas, main_proof}
+                              give a goal a plan; Lean checks that it fits together
+  clear_plan {goal}           forget a goal's plan, to prove it directly
+  statement {goal, lean}      change a lemma's Lean statement
+  assume {goal, on}           assume a lemma for now (or stop assuming it)
+  cite {goal, project}        prove a goal with an established project's theorem
+  finish                      run the final Lean check of the whole proof
+
+The server carries the actions out (interface/server.py, Live.act) and the chat shows what
+each one did. Lean still checks everything, so the assistant can't make a wrong proof count.
 """
+
+from dataclasses import dataclass, field
 
 from mathfinder import llm
 
-SYSTEM = """You are the side assistant in Math Finder, where a mathematician and an AI prove a
-theorem in Lean 4 together. The mathematician asks you a side question while they work.
+SYSTEM = """You are the assistant in Math Finder, where a mathematician and you prove a theorem
+in Lean 4 together. The proof is a tree of goals: the theorem "main" and its lemmas. Each goal
+has a Lean statement and either a direct proof or a plan (an idea, lemmas, and a main proof
+that combines them). Lean checks everything; only goals marked [proved] are proved.
 
-- Answer the question directly and briefly: a few sentences, or a short list.
-- Write Markdown, with LaTeX math in $...$ or $$...$$.
-- You cannot change the proof. When it would help, suggest something they can add themselves:
-  a lemma (its Lean statement after `theorem name`, and the same in LaTeX) or a hint for the planner.
+You are in a chat next to the proof. The mathematician may discuss the math with you, or tell
+you to do something. Reply in JSON:
+
+{"reply": "...", "actions": [ ... ]}
+
+"reply" is Markdown with LaTeX in $...$ or $$...$$, a few sentences or a short list.
+
+"actions" changes the proof. Take actions ONLY when the mathematician asks for something to
+be done (or clearly agrees to your suggestion); for a question, answer and leave it empty.
+The actions, carried out in order:
+  {"do": "stop"}                                     stop the running job
+  {"do": "note", "text": "..."}                      a hint every later plan and proof attempt sees
+  {"do": "clear_notes"}                              forget all hints
+  {"do": "prove", "goal": "main"}                    prove a goal (its lemmas first, then it)
+  {"do": "search", "goal": "main"}                   let the automatic search prove a goal on its own
+  {"do": "plan", "goal": "main", "sketch": "idea in one sentence",
+   "lemmas": [{"name": "step_one", "lean": "(n : ℤ) : 2 ∣ n * (n + 1)"}],
+   "main_proof": "Lean tactics that prove the goal from the lemmas"}
+                                                     replace a goal's plan (Lean checks it fits)
+  {"do": "clear_plan", "goal": "..."}                forget a goal's plan
+  {"do": "statement", "goal": "...", "lean": "..."}  change a lemma's statement (not main's)
+  {"do": "assume", "goal": "...", "on": true}        assume a lemma for now (on: false to undo)
+  {"do": "cite", "goal": "...", "project": "id"}     prove a goal with an established result
+  {"do": "finish"}                                   final check of the whole proof
+
+Rules:
+- A Lean statement is what follows `theorem name`, e.g. "(a b : ℝ) : a ^ 2 + b ^ 2 ≥ 2 * a * b".
+  Lemma names are Lean identifiers (letters, digits, _), different from every other goal.
+- In a main proof, use a lemma by name with its arguments: `nlinarith [step_one a b]`.
+- While a job is running, every action except stop and note waits for it; to change course,
+  put "stop" first. Only one of prove, search and finish can start at a time: put it last.
+- When asked to "try X" (a different approach), usually: stop if running, a note or a new
+  plan, then prove.
 - Use current Lean 4 and Mathlib names. If you are not sure a name exists, say so.
-- Be honest about what is proved: only goals marked [proved] are checked by Lean."""
+- A job you start reports its progress in the chat by itself ("step_one: proved"); you only
+  speak when the mathematician writes, so don't promise to report back.
+- Be honest: never call something proved that isn't marked [proved]."""
 
-HISTORY = 6  # earlier questions and answers to include, so follow-up questions make sense
+HISTORY = 14  # recent chat lines to include, so follow-ups make sense
+ACTIONS = {
+    "stop",
+    "note",
+    "clear_notes",
+    "prove",
+    "search",
+    "plan",
+    "clear_plan",
+    "statement",
+    "assume",
+    "cite",
+    "finish",
+}
 
 
-def ask(question: str, proof_state: str, history: list[tuple[str, str]] = ()) -> str:
-    """Answer `question` about the proof described in `proof_state`."""
-    parts = [f"The proof so far (goals, their status, plans and Lean errors):\n{proof_state}"]
-    for earlier_question, earlier_answer in list(history)[-HISTORY:]:
-        parts.append(f"Earlier question: {earlier_question}\nYour answer: {earlier_answer}")
-    parts.append(f"Question: {question}")
-    return llm.complete(SYSTEM, "\n\n".join(parts))
+@dataclass
+class Reply:
+    text: str
+    actions: list[dict] = field(default_factory=list)
+
+
+def build_prompt(message: str, situation: str, history: list[dict]) -> str:
+    parts = [situation]
+    lines = []
+    for entry in history[-HISTORY:]:
+        who = {"you": "Mathematician", "assistant": "You", "event": "Proof log"}.get(entry["role"], entry["role"])
+        lines.append(f"{who}: {entry['text']}")
+    if lines:
+        parts.append("The chat so far:\n" + "\n".join(lines))
+    parts.append(f"Mathematician: {message}")
+    return "\n\n".join(parts)
+
+
+def parse_reply(data: object) -> Reply:
+    """Keep the answer text and only well-formed actions of the known kinds."""
+    if not isinstance(data, dict):
+        return Reply(str(data))
+    actions = [a for a in data.get("actions") or [] if isinstance(a, dict) and a.get("do") in ACTIONS]
+    return Reply(str(data.get("reply", "")).strip(), actions)
+
+
+def reply(message: str, situation: str, history: list[dict] = ()) -> Reply:
+    """Answer `message`. `situation` describes the proof, what is running, notes and the library."""
+    return parse_reply(llm.complete_json(SYSTEM, build_prompt(message, situation, list(history))))

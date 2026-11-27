@@ -155,3 +155,22 @@ def test_citing_an_established_project_passes_the_real_final_check(monkeypatch):
     final = b.finish()
     assert final["ok"], final["errors"]
     assert final["lean_code"].startswith("namespace Project_aaaa1111")
+
+
+def test_notes_reach_every_later_plan_and_proof_attempt(fake, monkeypatch):
+    asked = {}
+    monkeypatch.setattr(
+        wsmod, "propose_plans", lambda lean, n, hints, feedback: asked.setdefault("hints", hints) and []
+    )
+    proved_with = []
+    original = wsmod.prove_lemma
+    monkeypatch.setattr(
+        wsmod, "prove_lemma", lambda lemma, *a, **k: proved_with.append(lemma.informal) or original(lemma, *a, **k)
+    )
+    ws = Workspace(": T")
+    ws.add_note("use induction")
+    ws.propose("main", ["mod 3"])
+    ws.run(lambda: ws.prove("main"))
+    assert asked["hints"] == ["use induction", "mod 3"]
+    assert proved_with == ["Hint: use induction"]
+    assert "Hints from the mathematician: use induction" in ws.summary()

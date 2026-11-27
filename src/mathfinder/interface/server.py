@@ -15,8 +15,13 @@ WORKSPACE: the theorem and the tree of lemmas you build with the assistant (prov
   POST   /api/projects/{id}/goals/{name}/{action}    → see GOAL_ACTIONS below
   POST   /api/projects/{id}/stop                     → stop the running job
   POST   /api/projects/{id}/finish                   → final Lean check, explanation, save
-  POST   /api/projects/{id}/ask        {question}    → the side assistant's answer
+  POST   /api/projects/{id}/chat       {message, looking_at} → your line and the assistant's (with what it did)
+  POST   /api/projects/{id}/notes      {notes}       → replace your hints for the prover
   WS     /ws/{id}                                    → the workspace now, then every change
+
+Each project is its own space: a chat on one side, the proof on the other. Everything that
+happens appears in the chat as a line: what you said, what the assistant answered and did,
+and what the proof itself reported ("step_one: proved").
 
 Slow jobs (proving, the search, the final check) run in a background thread and report
 through the WebSocket. Everything else answers directly.
@@ -24,6 +29,8 @@ through the WebSocket. Everything else answers directly.
 
 import asyncio
 import threading
+import time
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 
@@ -77,8 +84,9 @@ class GoalRequest(BaseModel):
     project: str = ""  # use-established
 
 
-class Question(BaseModel):
-    question: str
+class ChatMessage(BaseModel):
+    message: str
+    looking_at: str = "main"  # the goal open in the proof panel, so "this lemma" makes sense
 
 
 # ---------- an open project and the browsers watching it ----------
@@ -93,14 +101,30 @@ class Live:
             on_event=self.on_event,
             library_code=STORE.lean_code_for,
             goals=project.goals or None,
+            notes=project.notes,
         )
         self.listeners: list[tuple[asyncio.AbstractEventLoop, asyncio.Queue]] = []
-        self.lock = threading.Lock()
+        self.lock = threading.Lock()  # guards the listeners
+        self.saving = threading.RLock()  # the chat grows from several threads; save one at a time
+        self.job_to_start = None  # a job the assistant asked for, started once its reply is shown
 
     def save(self) -> None:
-        self.project.goals = self.workspace.saved_goals()
-        self.project.uses = self.workspace.projects_used()
-        STORE.save(self.project)
+        with self.saving:
+            self.project.goals = self.workspace.saved_goals()
+            self.project.uses = self.workspace.projects_used()
+            self.project.notes = list(self.workspace.notes)
+            STORE.save(self.project)
+
+    def add_line(self, role: str, text: str, actions: list[dict] = ()) -> dict:
+        """Add a line to the chat, save it, and show it on every open page."""
+        entry = {"id": uuid.uuid4().hex[:10], "role": role, "text": text, "time": time.time()}
+        if actions:
+            entry["actions"] = list(actions)
+        with self.saving:
+            self.project.conversation.append(entry)
+            self.save()
+        self.broadcast({"kind": "chat", "entry": entry})
+        return entry
 
     def view(self) -> dict:
         """Everything the page needs to show this project."""
@@ -112,14 +136,18 @@ class Live:
             "established": p.established,
             "workspace": self.workspace.to_dict(),
             "conversation": p.conversation,
+            "notes": self.workspace.notes,
             "result": p.result,
         }
 
     def on_event(self, event: dict) -> None:
-        """Called by the workspace (from any thread) for every change: save it, then tell the pages."""
+        """Called by the workspace (from any thread) for every change: save it, then tell the pages.
+        Its log lines ("step_one: proved") also go into the chat."""
         if "workspace" in event:
             self.save()
         self.broadcast(event)
+        if event["kind"] == "log":
+            self.add_line("event", event["text"])
 
     def broadcast(self, event: dict) -> None:
         with self.lock:
@@ -148,6 +176,7 @@ class Live:
                 self.workspace.run(job)
             except Exception as e:  # never leave the page waiting without saying why
                 self.broadcast({"kind": "error", "text": str(e)})
+                self.add_line("event", f"Stopped with an error: {e}")
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -162,6 +191,7 @@ class Live:
             self.project.result = outcome
             self.save()
             self.broadcast({"kind": "finished", "result": outcome})
+            self.add_line("event", outcome["message"])
             return
         self.broadcast({"kind": "log", "text": "Writing the explanation…"})
         theorem = self.project.latex or self.project.statement
@@ -176,6 +206,129 @@ class Live:
         self.project.established_code = in_namespace(result["own_code"], self.project.namespace)
         self.save()
         self.broadcast({"kind": "finished", "result": outcome, "established": True})
+        self.add_line("event", "The whole proof passed Lean's final check. This project is now established.")
+
+    # ---------- the chat ----------
+
+    def chat(self, message: str, looking_at: str = "main") -> list[dict]:
+        """Your message, the assistant's reply and the actions it took, all added to the chat.
+        A job the assistant starts (prove, search, finish) starts after its reply is in the chat,
+        so the job's updates come after it."""
+        history = list(self.project.conversation)
+        mine = self.add_line("you", message)
+        try:
+            reply = assistant.reply(message, self.situation(looking_at), history)
+        except LLMError as e:
+            return [mine, self.add_line("assistant", f"(I couldn't answer: {e})")]
+        self.job_to_start = None
+        done = [self.act(action) for action in reply.actions]
+        answer = self.add_line("assistant", reply.text, done)
+        job, self.job_to_start = self.job_to_start, None
+        if job is not None:
+            try:
+                self.in_background(job)
+            except HTTPException:
+                self.add_line("event", "Couldn't start: something else started running first.")
+        return [mine, answer]
+
+    def start_after_reply(self, job, text: str) -> tuple[bool, str]:
+        if self.job_to_start is not None:
+            return False, "skipped: only one job can run at a time"
+        self.job_to_start = job
+        return True, text
+
+    def situation(self, looking_at: str) -> str:
+        """What the assistant needs to know right now."""
+        ws = self.workspace
+        parts = [f"The proof (goals, status, plans, what Lean said):\n{ws.summary()}"]
+        parts.append("A job is RUNNING now." if ws.busy else "Nothing is running.")
+        if looking_at in ws.goals and looking_at != "main":
+            parts.append(f"The mathematician is looking at the goal {looking_at}.")
+        library = STORE.library(excluding=self.project.id)
+        if library:
+            parts.append(
+                "Established results from other projects (cite with their id):\n"
+                + "\n".join(f"- id {r['id']}: {r['statement']}" for r in library)
+            )
+        return "\n\n".join(parts)
+
+    def act(self, action: dict) -> dict:
+        """Carry out one action from the assistant. Returns what happened, for the chat."""
+        try:
+            ok, text = self._act(action)
+        except (ValueError, KeyError, TypeError) as e:
+            ok, text = False, f"couldn't: {e}"
+        return {"do": action["do"], "ok": ok, "text": text}
+
+    def _act(self, a: dict) -> tuple[bool, str]:
+        ws, do = self.workspace, a["do"]
+        if do == "stop":
+            if not ws.busy:
+                return True, "nothing was running"
+            ws.session.stop()
+            stopped = wait_until(lambda: not ws.busy, STOP_WAIT)
+            return True, "stopped" if stopped else "asked to stop; it stops after the step it is on"
+        if do == "note":
+            ws.add_note(str(a["text"]))
+            self.save()
+            return True, f"noted: {a['text']}"
+        if do == "clear_notes":
+            ws.clear_notes()
+            self.save()
+            return True, "forgot all hints"
+        if ws.busy or self.job_to_start is not None:
+            return False, "skipped: a job is still running (stop it first)"
+        if do == "finish":
+            root = ws.goals["main"]
+            if root.status != "proved" or ws.assumed_below("main"):
+                return False, "the theorem isn't proved without assumptions yet"
+            return self.start_after_reply(self.finish, "started the final check")
+        goal = a.get("goal", "main")
+        if goal not in ws.goals:
+            return False, f"there is no goal called {goal}"
+        if do == "prove":
+            return self.start_after_reply(lambda: ws.prove(goal), f"started proving {goal}")
+        if do == "search":
+            return self.start_after_reply(lambda: ws.auto(goal), f"started the search for {goal}")
+        if do == "plan":
+            lemmas = [{"name": str(lem["name"]), "lean": str(lem["lean"])} for lem in a.get("lemmas", [])]
+            problems = ws.set_plan(goal, str(a.get("sketch", "")), str(a.get("main_proof", "")), lemmas)
+            self.save()
+            if problems:
+                return False, f"new plan for {goal} saved, but it doesn't fit together yet: {problems[0][:300]}"
+            return True, f"new plan for {goal} with {len(lemmas)} lemmas; Lean says it fits together"
+        if do == "clear_plan":
+            ws.clear_plan(goal)
+            self.save()
+            return True, f"removed the plan for {goal}"
+        if do == "statement":
+            errors = ws.edit_statement(goal, str(a["lean"]))
+            self.save()
+            return (False, f"Lean rejected it: {errors[0][:300]}") if errors else (True, f"changed {goal}")
+        if do == "assume":
+            on = bool(a.get("on", True))
+            ws.assume(goal, on)
+            self.save()
+            return True, f"{'assuming' if on else 'no longer assuming'} {goal}"
+        if do == "cite":
+            check_citations(self.project.id, [str(a["project"])])
+            ws.use_established(goal, str(a["project"]))
+            self.save()
+            g = ws.goals[goal]
+            return g.status == "proved", f"{goal} cited" if g.status == "proved" else g.feedback[:300]
+        return False, f"unknown action {do}"
+
+
+STOP_WAIT = 30  # seconds to wait for a stopped job to end before going on
+
+
+def wait_until(condition, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.2)
+    return True
 
 
 def in_namespace(code: str, namespace: str) -> str:
@@ -311,17 +464,23 @@ def finish(project_id: str) -> dict:
     return {"started": True}
 
 
-@app.post("/api/projects/{project_id}/ask")
-def ask(project_id: str, req: Question) -> dict:
+@app.post("/api/projects/{project_id}/chat")
+def chat(project_id: str, req: ChatMessage) -> dict:
     opened = live(project_id)
-    history = [tuple(turn) for turn in opened.project.conversation]
-    try:
-        answer = assistant.ask(req.question, opened.workspace.summary(), history)
-    except LLMError as e:
-        raise HTTPException(status_code=502, detail=f"the assistant could not answer: {e}") from e
-    opened.project.conversation.append([req.question, answer])
+    return {"entries": opened.chat(req.message, req.looking_at), "workspace": opened.workspace.to_dict()}
+
+
+class Notes(BaseModel):
+    notes: list[str]
+
+
+@app.post("/api/projects/{project_id}/notes")
+def set_notes(project_id: str, req: Notes) -> dict:
+    """Replace your hints (the chat adds them; the page can clear them)."""
+    opened = live(project_id)
+    opened.workspace.notes = [n.strip() for n in req.notes if n.strip()]
     opened.save()
-    return {"answer": answer}
+    return {"notes": opened.workspace.notes}
 
 
 @app.websocket("/ws/{project_id}")

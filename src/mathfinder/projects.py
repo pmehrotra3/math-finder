@@ -1,6 +1,6 @@
 """Projects: every theorem you work on is a project, saved on disk so you can come back to it.
 
-A project holds the workspace (the tree of goals), the side assistant's conversation and,
+A project holds the workspace (the tree of goals), the chat with the assistant and,
 once the whole proof passed Lean's final check, the verified Lean code. From then on the
 project is ESTABLISHED: other projects can use its theorem as a lemma.
 
@@ -33,7 +33,10 @@ class Project:
     created: float = field(default_factory=time.time)
     updated: float = field(default_factory=time.time)
     goals: dict = field(default_factory=dict)  # the workspace's goals (see proving/workspace.py)
-    conversation: list = field(default_factory=list)  # [[question, answer], ...] with the side assistant
+    # the chat: {"role": "you" | "assistant" | "event", "text": ..., "actions": [...], "time": ...}
+    # ("event" lines come from the proof itself: "step_one: proved", ...)
+    conversation: list = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)  # hints for every plan and proof attempt
     result: dict | None = None  # the last final check: {proved, lean_code, explanation, folder, message}
     established_code: str = ""  # verified Lean, in namespace Project_<id>; "" = not established yet
     uses: list[str] = field(default_factory=list)  # ids of established projects this one builds on
@@ -71,6 +74,7 @@ class ProjectStore:
         self.projects: dict[str, Project] = {}
         for path in sorted(self.folder.glob("*.json")):
             project = Project(**json.loads(path.read_text()))
+            project.conversation = [*upgraded(project.conversation)]
             for goal in project.goals.values():  # a job that was running when the server stopped is gone
                 if goal.get("status") == "working":
                     goal["status"] = "open"
@@ -131,3 +135,13 @@ class ProjectStore:
                 if needed not in order:
                     order.append(needed)
         return "\n\n".join(self.projects[pid].established_code for pid in order)
+
+
+def upgraded(conversation: list):
+    """Older projects saved the chat as [question, answer] pairs; turn those into chat lines."""
+    for entry in conversation:
+        if isinstance(entry, list):
+            yield {"role": "you", "text": entry[0]}
+            yield {"role": "assistant", "text": entry[1]}
+        else:
+            yield entry

@@ -12,6 +12,7 @@ LaTeX version of it, and either a direct proof or a PLAN: an idea, a list of sma
   assume(goal)          skip it for now; everything above it then counts as "proved, assuming"
   use_established(goal, project)
                         prove it by citing a theorem another project already established
+  add_note(text)        a hint from you that every later plan and proof attempt sees
   finish()              put the whole tree into one Lean file and run the strict final check
 
 The workspace itself doesn't know where projects are stored: the server gives it a
@@ -62,14 +63,16 @@ class Workspace:
         on_event: Callable[[dict], None] = lambda e: None,
         library_code: Callable[[list[str]], str] = lambda project_ids: "",
         goals: dict | None = None,
+        notes: list[str] | None = None,
     ):
-        """A new workspace for `statement`, or a saved one when `goals` (from to_dict) is given."""
+        """A new workspace for `statement`, or a saved one when `goals` (from saved_goals) is given."""
         if goals:
             self.goals = {name: Goal(**fields) for name, fields in goals.items()}
         else:
             self.goals = {ROOT: Goal(ROOT, statement, latex)}
         self.on_event = on_event
         self.library_code = library_code
+        self.notes = list(notes or [])  # your hints, for every plan and proof attempt from now on
         self.session = Session()  # lets the user stop a running job
         self._job = threading.Lock()
 
@@ -151,6 +154,8 @@ class Workspace:
                 walk(child, depth + 1)
 
         walk(ROOT, 0)
+        if self.notes:
+            lines.append("Hints from the mathematician: " + " | ".join(self.notes))
         return "\n".join(lines)
 
     # ---------- changing the tree ----------
@@ -161,10 +166,18 @@ class Workspace:
     def _log(self, text: str) -> None:
         self.on_event({"kind": "log", "text": text})
 
+    def add_note(self, text: str) -> None:
+        """Remember a hint. A job that is running now gets it at its next step."""
+        self.notes.append(text.strip())
+        self.session.add_hint(text)
+
+    def clear_notes(self) -> None:
+        self.notes = []
+
     def propose(self, name: str, hints: list[str] = (), n: int = 2) -> list[dict]:
         """Plans for `name` from the model, with Lean's verdict on whether each one fits together."""
         g = self.goals[name]
-        plans = propose_plans(g.lean, n, list(hints), g.feedback)
+        plans = propose_plans(g.lean, n, [*self.notes, *hints], g.feedback)
         taken = set(self.goals) - set(self.descendants(name))
         for plan in plans:
             rename_clashes(plan, name, taken)
@@ -348,7 +361,8 @@ class Workspace:
             self.on_event({"kind": "attempt", "name": g.name, "ok": attempt["ok"], "source": attempt["source"]})
 
         usable = self.lemmas_for(self.context_for(g.name))
-        lemma = Lemma(name=g.name, statement=g.lean, informal=g.informal)
+        informal = " ".join([g.informal, *(f"Hint: {note}" for note in self.notes)]).strip()
+        lemma = Lemma(name=g.name, statement=g.lean, informal=informal)
         lemma = prove_lemma(lemma, usable, record, background=self.background())
         g.status = lemma.status if lemma.status != "open" else "stuck"
         g.proof, g.feedback = lemma.proof, lemma.feedback
@@ -380,9 +394,10 @@ class Workspace:
         g.status = "working"
         self._emit_goal(name)
         self._log(f"{name}: searching on its own…")
-        result = search(g.lean, rounds=rounds, on_event=self._relay, session=self.session)
+        result = search(g.lean, list(self.notes), rounds=rounds, on_event=self._relay, session=self.session)
         if not result.proved:
             g.status, g.feedback = "stuck", result.message
+            self._log(f"{name}: no proof found ({result.message})")
             self._emit_goal(name)
             return
         plan = result.plan

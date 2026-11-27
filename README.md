@@ -12,12 +12,19 @@ any mistake. Math Finder combines them: the AI (Claude) has the ideas, and a pro
 
 ## Working with it
 
-Math Finder works like a proof assistant sitting next to you.
+Math Finder is laid out like a chat app. Your projects are on the left. Every theorem is a **project**, saved on
+your computer, and each one is its own space: **a chat on one side, the proof on the other.**
 
-1. **Write** the theorem in LaTeX, for example *for every integer n, 6 divides n³ − n*.
+1. **Write** the theorem in LaTeX (*New project*), for example *for every integer n, 6 divides n³ − n*.
 2. **Confirm** the Lean version. It is translated back into LaTeX without seeing your text, so you can check
    that it says what you meant.
-3. **Plan and prove** in the workspace:
+3. **Work on it together.** In the chat you can discuss the math ("why is this lemma true?") or tell the assistant
+   what to do: "make a plan with one lemma per case and prove it", "stop, and try induction on n instead",
+   "assume step_two for now". It changes the proof only when you ask, says what it did under its reply, and
+   what the proof reports ("case_even: proved") appears in the chat as it happens. Your hints are kept and given
+   to every later plan and proof attempt.
+
+   The proof panel shows the same work, and every button there does what the chat can do:
    - **Plan.** Ask for plans, or write your own. A plan is an idea, a list of lemmas, and a short Lean proof
      that combines them. Lean checks that the lemmas really imply the goal before anything is proved.
    - **Lean first, then LaTeX.** Every lemma is written in Lean, and its formal LaTeX is generated from that Lean,
@@ -25,19 +32,16 @@ Math Finder works like a proof assistant sitting next to you.
    - **Zoom in and out.** Open a lemma to give it a plan of its own, see every proof attempt with Lean's errors,
      or prove it on its own. The outline and the breadcrumb take you back out.
    - **Prove, search, or assume.** Prove a goal (its lemmas first), let the automatic search handle it, or
-     assume a lemma for now and come back to it later.
-   - **Ask on the side.** A side assistant answers questions about the proof at any time, without stopping or
-     changing anything.
+     assume a lemma for now and come back to it later. **Stop** ends a running job.
 4. **Check and explain.** When the theorem is proved with nothing assumed, the whole tree goes through Lean's
    final check (no gaps, only standard axioms) and you get an explanation in ordinary mathematics.
 
-### Projects
+### Building on earlier projects
 
-Every theorem is a **project**, saved on your computer, so you can keep many of them and come back later. A project
-whose proof passed the final check is **established**: in any other project you can use its theorem as a lemma.
-Lean still checks everything. The established project's verified code is included in the new proof, in a namespace
-of its own, and the lemma is proved by applying that project's theorem. Projects that cite each other in a circle
-are refused, and a project can't be deleted while another one cites it.
+A project whose proof passed the final check is **established**: in any other project you can use its theorem as a
+lemma. Lean still checks everything. The established project's verified code is included in the new proof, in a
+namespace of its own, and the lemma is proved by applying that project's theorem. Projects that cite each other in
+a circle are refused, and a project can't be deleted while another one cites it.
 
 The command line (`mathfinder prove`) runs the same steps automatically, without the workspace or projects.
 
@@ -86,7 +90,7 @@ src/mathfinder/
 │   └── web/               web page
 ├── projects.py          saved projects, and the established results they share
 ├── benchmark/           the test problems, and how many it solves
-├── assistant.py         the side assistant that answers your questions
+├── assistant.py         the chat: answers you, and acts on the proof when you ask
 └── llm.py               talks to Claude
 
 lean/                    pinned versions of Lean, Mathlib and the REPL

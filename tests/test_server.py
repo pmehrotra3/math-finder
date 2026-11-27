@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mathfinder import assistant, pipeline
+from mathfinder.assistant import Reply, parse_reply
 from mathfinder.interface import server
 from mathfinder.llm import LLMError
 from mathfinder.projects import ProjectStore
@@ -212,31 +213,106 @@ def test_assume_then_edit_a_statement(client):
     assert (edited["lean"], edited["latex"], edited["status"]) == (": A2", "$: A2$", "open")
 
 
-def test_the_side_assistant_sees_the_proof_and_keeps_the_conversation(client, monkeypatch):
-    seen = []
+def chat(client, project_id, message, looking_at="main"):
+    return client.post(f"/api/projects/{project_id}/chat", json={"message": message, "looking_at": looking_at})
 
-    def fake_ask(question, proof_state, history):
-        seen.append((question, proof_state, list(history)))
-        return f"answer to {question}"
 
-    monkeypatch.setattr(assistant, "ask", fake_ask)
+def scripted(monkeypatch, *replies):
+    """The assistant gives these replies in order; returns what it was shown each time."""
+    seen, queue = [], list(replies)
+
+    def fake_reply(message, situation, history):
+        seen.append({"message": message, "situation": situation, "history": list(history)})
+        return queue.pop(0)
+
+    monkeypatch.setattr(assistant, "reply", fake_reply)
+    return seen
+
+
+def test_the_chat_answers_with_the_proof_in_view_and_keeps_the_conversation(client, monkeypatch):
+    seen = scripted(monkeypatch, Reply("Because squares are $\\ge 0$."), Reply("Then add them."))
     project_id = new_project(client)
-    assert client.post(f"/api/projects/{project_id}/ask", json={"question": "why?"}).json() == {
-        "answer": "answer to why?"
-    }
-    client.post(f"/api/projects/{project_id}/ask", json={"question": "and then?"})
-    assert "- main [open]: : T" in seen[0][1]
-    assert seen[1][2] == [("why?", "answer to why?")]
-    assert client.get(f"/api/projects/{project_id}").json()["conversation"][0] == ["why?", "answer to why?"]
+    answer = chat(client, project_id, "why?").json()["entries"][1]
+    assert (answer["role"], answer["text"]) == ("assistant", "Because squares are $\\ge 0$.")
+    chat(client, project_id, "and then?")
+    assert "- main [open]: : T" in seen[0]["situation"] and "Nothing is running." in seen[0]["situation"]
+    assert [(e["role"], e["text"]) for e in seen[1]["history"]] == [
+        ("you", "why?"),
+        ("assistant", "Because squares are $\\ge 0$."),
+    ]
+    lines = client.get(f"/api/projects/{project_id}").json()["conversation"]
+    assert [e["role"] for e in lines] == ["you", "assistant", "you", "assistant"]
 
 
-def test_the_assistant_failing_is_a_clear_error(client, monkeypatch):
+def test_the_chat_can_change_the_plan_add_a_hint_and_assume(client, monkeypatch):
+    plan = {"do": "plan", "goal": "main", "sketch": "split", "main_proof": "exact good_a",
+            "lemmas": [{"name": "good_a", "lean": ": A"}]}  # fmt: skip
+    actions = [plan, {"do": "note", "text": "use induction"}, {"do": "assume", "goal": "good_a", "on": True}]
+    scripted(monkeypatch, Reply("Done.", actions))
+    project_id = new_project(client)
+    reply = chat(client, project_id, "split it and assume the lemma").json()
+    assert [a["ok"] for a in reply["entries"][1]["actions"]] == [True, True, True]
+    goals = reply["workspace"]["goals"]
+    assert goals["main"]["children"] == ["good_a"] and goals["good_a"]["status"] == "assumed"
+    assert client.get(f"/api/projects/{project_id}").json()["notes"] == ["use induction"]
+
+
+def test_the_chat_can_start_proving_and_its_progress_shows_in_the_chat(client, monkeypatch):
+    scripted(monkeypatch, Reply("Proving it now.", [{"do": "prove", "goal": "main"}]))
+    project_id = new_project(client)
+    with_one_lemma_plan(client, project_id, "good_a")
+    with client.websocket_connect(f"/ws/{project_id}") as ws:
+        ws.receive_json()
+        assert chat(client, project_id, "go").json()["entries"][1]["actions"][0]["text"] == "started proving main"
+        events = [ws.receive_json()]
+        while events[-1]["kind"] != "idle":
+            events.append(ws.receive_json())
+    lines = client.get(f"/api/projects/{project_id}").json()["conversation"]
+    assert {"good_a: proved", "main: proved"} <= {e["text"] for e in lines if e["role"] == "event"}
+
+
+def test_stop_comes_first_and_other_actions_wait_for_the_job(client, monkeypatch):
+    monkeypatch.setattr(server, "STOP_WAIT", 0.3)
+    scripted(monkeypatch, Reply("Stopping.", [{"do": "stop"}, {"do": "prove", "goal": "main"}]))
+    project_id = new_project(client)
+    workspace = server.live(project_id).workspace
+    workspace._job.acquire()  # a job that doesn't end
+    try:
+        done = chat(client, project_id, "stop and try again").json()["entries"][1]["actions"]
+    finally:
+        workspace._job.release()
+    assert workspace.session.stopped
+    assert done[0]["text"].startswith("asked to stop") and not done[1]["ok"]
+
+
+def test_a_bad_action_is_reported_not_crashed(client, monkeypatch):
+    scripted(monkeypatch, Reply("Hm.", [{"do": "prove", "goal": "nope"}, {"do": "statement", "goal": "main"}]))
+    done = chat(client, new_project(client), "do it").json()["entries"][1]["actions"]
+    assert [a["ok"] for a in done] == [False, False]
+    assert "no goal called nope" in done[0]["text"]
+
+
+def test_the_assistant_failing_is_said_in_the_chat(client, monkeypatch):
     def broken(*args):
         raise LLMError("model unavailable")
 
-    monkeypatch.setattr(assistant, "ask", broken)
-    answer = client.post(f"/api/projects/{new_project(client)}/ask", json={"question": "why?"})
-    assert answer.status_code == 502 and "model unavailable" in answer.json()["detail"]
+    monkeypatch.setattr(assistant, "reply", broken)
+    entry = chat(client, new_project(client), "why?").json()["entries"][1]
+    assert entry["role"] == "assistant" and "model unavailable" in entry["text"]
+
+
+def test_the_assistant_keeps_only_known_actions():
+    data = {"reply": " ok ", "actions": [{"do": "prove", "goal": "main"}, {"do": "rm -rf"}, "junk"]}
+    assert parse_reply(data) == Reply("ok", [{"do": "prove", "goal": "main"}])
+
+
+def test_old_conversations_are_read_as_chat_lines(tmp_path):
+    store = ProjectStore(tmp_path)
+    project = store.create(": T")
+    project.conversation = [["why?", "because"]]
+    store.save(project)
+    lines = ProjectStore(tmp_path).projects[project.id].conversation
+    assert lines == [{"role": "you", "text": "why?"}, {"role": "assistant", "text": "because"}]
 
 
 def test_changes_are_refused_while_a_job_runs(client):
@@ -262,5 +338,26 @@ def test_bad_requests_are_rejected(client):
 
 def test_the_web_page_is_served(client):
     page = client.get("/").text
-    assert "<title>Math Finder</title>" in page and 'id="projects-panel"' in page
+    assert "<title>Math Finder</title>" in page and 'id="project-list"' in page
     assert client.get("/app.js").status_code == 200
+
+
+def test_the_reply_comes_before_the_job_it_starts(client, monkeypatch):
+    scripted(monkeypatch, Reply("On it.", [{"do": "prove", "goal": "main"}, {"do": "search", "goal": "main"}]))
+    project_id = new_project(client)
+    with_one_lemma_plan(client, project_id, "good_a")
+    with client.websocket_connect(f"/ws/{project_id}") as ws:
+        ws.receive_json()
+        done = chat(client, project_id, "go").json()["entries"][1]["actions"]
+        events = [ws.receive_json()]
+        while events[-1]["kind"] != "idle":
+            events.append(ws.receive_json())
+    assert [a["ok"] for a in done] == [True, False]  # one job at a time
+    roles = [e["role"] for e in client.get(f"/api/projects/{project_id}").json()["conversation"]]
+    assert roles[:2] == ["you", "assistant"] and set(roles[2:]) == {"event"}
+
+
+def test_hints_can_be_cleared_from_the_page(client):
+    project_id = new_project(client)
+    server.live(project_id).workspace.add_note("use induction")
+    assert client.post(f"/api/projects/{project_id}/notes", json={"notes": []}).json() == {"notes": []}
