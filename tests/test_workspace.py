@@ -193,3 +193,12 @@ def test_a_written_proof_of_a_planned_goal_becomes_its_main_proof(fake):
     ws.run(lambda: ws.prove("good_a"))
     assert ws.try_proof("main", "exact good_a") == (True, "")
     assert ws.goals["main"].children == ["good_a"] and ws.goals["main"].proof == "exact good_a"
+
+
+def test_renaming_changes_only_whole_names(fake):
+    ws = Workspace(": T")
+    ws.set_plan("main", "", "exact ⟨step, step_two, Nat.step⟩", lemmas("step", "step_two"))
+    ws.rename("step", "base")
+    assert ws.goals["main"].proof == "exact ⟨base, step_two, Nat.step⟩"
+    with pytest.raises(ValueError, match="already used"):
+        ws.rename("base", "step_two")

@@ -92,7 +92,7 @@ def test_established_code_comes_with_everything_it_builds_on(tmp_path):
         store.save(p)
     assert store.lean_code_for([b.id, a.id]) == "A-code\n\nB-code"  # each once, dependencies first
     assert {r["id"] for r in store.library(excluding=c.id)} == {a.id, b.id}
-    assert {r["id"] for r in store.library(excluding=a.id)} == set()  # b uses a, so a can't use b
+    assert {r["id"] for r in store.library(excluding=a.id)} == {c.id}  # b uses a, so a can't use b
     with pytest.raises(ValueError, match="other projects use this one"):
         store.delete(a.id)
     store.delete(c.id)
@@ -183,12 +183,44 @@ def test_a_project_can_cite_an_established_one(client):
     assert client.delete(f"/api/projects/{established}").status_code == 400  # it is in use
 
 
-def test_only_established_projects_can_be_cited(client):
+def test_an_unfinished_project_counts_as_assumed_until_it_is_established(client):
     unfinished = new_project(client, ": A")
     project_id = new_project(client)
     act(client, project_id, "main", "plan", sketch="", main_proof="simp", lemmas=[{"name": "good_a", "lean": ": A"}])
-    answer = act(client, project_id, "good_a", "use-established", project=unfinished)
-    assert answer.status_code == 400 and "not an established result" in answer.json()["detail"]
+    goals = act(client, project_id, "good_a", "use-established", project=unfinished).json()["workspace"]["goals"]
+    assert goals["good_a"]["status"] == "assumed" and goals["good_a"]["established_by"] == unfinished
+    server.STORE.projects[unfinished].established_code = "namespace X\nend X\n"  # it gets established later
+    with client.websocket_connect(f"/ws/{project_id}") as ws:
+        ws.receive_json()
+        act(client, project_id, "good_a", "prove")
+        while ws.receive_json()["kind"] != "idle":
+            pass
+    assert client.get(f"/api/projects/{project_id}").json()["workspace"]["goals"]["good_a"]["status"] == "proved"
+
+
+def test_a_project_cannot_use_one_that_uses_it(client):
+    first = new_project(client, ": A")
+    second = new_project(client)
+    act(client, second, "main", "use-established", project=first)
+    answer = act(client, first, "main", "plan", sketch="", main_proof="simp",
+                 lemmas=[{"name": "loop", "lean": ": T", "established_by": second}])  # fmt: skip
+    assert answer.status_code == 400 and "can use" in answer.json()["detail"]
+
+
+def test_projects_have_names_you_can_change(client):
+    project_id = client.post("/api/projects", json={"statement": ": T", "name": "Odd sums"}).json()["id"]
+    assert client.get("/api/projects").json()["projects"][0]["name"] == "Odd sums"
+    assert client.patch(f"/api/projects/{project_id}", json={"name": "Sum of odd numbers"}).status_code == 200
+    assert client.get(f"/api/projects/{project_id}").json()["name"] == "Sum of odd numbers"
+
+
+def test_a_lemma_can_be_renamed_and_its_uses_follow(client):
+    project_id = new_project(client)
+    act(client, project_id, "main", "plan", sketch="", main_proof="exact step_1",
+        lemmas=[{"name": "step_1", "lean": ": A"}])  # fmt: skip
+    goals = act(client, project_id, "step_1", "rename", new_name="key_bound").json()["workspace"]["goals"]
+    assert goals["main"]["children"] == ["key_bound"] and goals["main"]["proof"] == "exact key_bound"
+    assert act(client, project_id, "key_bound", "rename", new_name="main").status_code == 400
 
 
 def test_a_project_survives_a_server_restart(client, monkeypatch):
@@ -419,3 +451,11 @@ def test_hints_can_be_cleared_from_the_page(client):
     project_id = new_project(client)
     server.live(project_id).workspace.add_note("use induction")
     assert client.post(f"/api/projects/{project_id}/notes", json={"notes": []}).json() == {"notes": []}
+
+
+def test_a_project_without_a_name_gets_one_suggested(client, monkeypatch):
+    monkeypatch.setattr(server.formalizer, "suggest_name", lambda theorem: f"name for {theorem}")
+    project_id = new_project(client)
+    assert client.post(f"/api/projects/{project_id}/suggest-name").json() == {"name": "name for $T$"}
+    monkeypatch.setattr(server.formalizer, "suggest_name", lambda theorem: "should not be asked again")
+    assert client.post(f"/api/projects/{project_id}/suggest-name").json() == {"name": "name for $T$"}

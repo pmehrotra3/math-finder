@@ -30,6 +30,7 @@ class Project:
     title: str  # the theorem as you wrote it (LaTeX), or its Lean statement
     statement: str  # the approved Lean statement
     latex: str = ""
+    name: str = ""  # a short name you choose ("AM-GM for two numbers"); the title is shown if empty
     created: float = field(default_factory=time.time)
     updated: float = field(default_factory=time.time)
     goals: dict = field(default_factory=dict)  # the workspace's goals (see proving/workspace.py)
@@ -54,11 +55,13 @@ class Project:
         root = self.goals.get("main", {})
         return {
             "id": self.id,
+            "name": self.name or self.title,
             "title": self.title,
             "statement": self.statement,
             "latex": self.latex,
             "updated": self.updated,
             "status": "established" if self.established else root.get("status", "open"),
+            "established": self.established,
             "lemmas": max(0, len(self.goals) - 1),
             "uses": self.uses,
         }
@@ -80,8 +83,10 @@ class ProjectStore:
                     goal["status"] = "open"
             self.projects[project.id] = project
 
-    def create(self, statement: str, latex: str = "") -> Project:
-        project = Project(id=uuid.uuid4().hex[:8], title=latex or statement, statement=statement, latex=latex)
+    def create(self, statement: str, latex: str = "", name: str = "") -> Project:
+        project = Project(
+            id=uuid.uuid4().hex[:8], title=latex or statement, statement=statement, latex=latex, name=name.strip()
+        )
         self.save(project)
         return project
 
@@ -106,12 +111,17 @@ class ProjectStore:
         return [p.summary() for p in sorted(self.projects.values(), key=lambda p: -p.updated)]
 
     def library(self, excluding: str = "") -> list[dict]:
-        """Established results that another project may use (never itself, never one that uses it)."""
+        """The projects another project may plug in as a lemma: never itself, never one that uses it
+        (that would be circular). An established one is a proved lemma; one that isn't established
+        yet counts as assumed until it is."""
         return [
             {**p.summary(), "theorem": f"{p.namespace}.main"}
-            for p in self.projects.values()
-            if p.established and p.id != excluding and excluding not in self.everything_used_by(p.id)
+            for p in sorted(self.projects.values(), key=lambda p: (not p.established, -p.updated))
+            if p.id != excluding and excluding not in self.everything_used_by(p.id)
         ]
+
+    def is_established(self, project_id: str) -> bool:
+        return project_id in self.projects and self.projects[project_id].established
 
     def everything_used_by(self, project_id: str) -> list[str]:
         """The projects `project_id` builds on, directly or through others; the deepest ones first."""

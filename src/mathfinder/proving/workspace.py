@@ -13,7 +13,9 @@ LaTeX version of it, and either a direct proof or a PLAN: an idea, a list of sma
   auto(goal)            let the full search find a plan and proofs on its own
   assume(goal)          skip it for now; everything above it then counts as "proved, assuming"
   use_established(goal, project)
-                        prove it by citing a theorem another project already established
+                        prove it with another project's theorem. If that project isn't established
+                        yet, the goal counts as assumed until it is.
+  rename(goal, new_name) give a lemma a better name (its uses in proofs are renamed too)
   add_note(text)        a hint from you that every later plan and proof attempt sees
   finish()              put the whole tree into one Lean file and run the strict final check
 
@@ -64,6 +66,7 @@ class Workspace:
         latex: str = "",
         on_event: Callable[[dict], None] = lambda e: None,
         library_code: Callable[[list[str]], str] = lambda project_ids: "",
+        is_established: Callable[[str], bool] = lambda project_id: True,
         goals: dict | None = None,
         notes: list[str] | None = None,
     ):
@@ -74,6 +77,7 @@ class Workspace:
             self.goals = {ROOT: Goal(ROOT, statement, latex)}
         self.on_event = on_event
         self.library_code = library_code
+        self.is_established = is_established
         self.notes = list(notes or [])  # your hints, for every plan and proof attempt from now on
         self.session = Session()  # lets the user stop a running job
         self._job = threading.Lock()
@@ -301,16 +305,47 @@ class Workspace:
         g.children, g.sketch, g.problems = [], "", []
         g.established_by = project_id
         self._cite(g)
-        self._log(f"{name}: " + ("proved by citing an established project" if g.status == "proved" else g.feedback))
+        self._log(f"{name}: " + self._cite_outcome(g))
         self._emit_goal(name)
 
     def _cite(self, g: Goal) -> None:
         """Ask Lean whether the established theorem proves `g`. Its statement must match, up to
-        hypotheses that `assumption` can fill in."""
+        hypotheses that `assumption` can fill in. A project that isn't established yet can't be
+        checked: until it is, `g` counts as assumed."""
+        if not self.is_established(g.established_by):
+            g.status, g.proof, g.feedback = "assumed", "", ""
+            return
         g.proof = f"apply Project_{g.established_by}.main <;> assumption"
         self._check_main_proof(g)
         if g.status != "proved":
             g.feedback = "the established theorem doesn't prove this statement: " + g.feedback
+
+    def _cite_outcome(self, g: Goal) -> str:
+        if g.status == "proved":
+            return "proved with another project's established theorem"
+        if g.status == "assumed":
+            return "taken from another project; assumed until that project is established"
+        return g.feedback
+
+    def rename(self, name: str, new_name: str) -> None:
+        """Rename a lemma. Every proof that uses it is changed to the new name."""
+        new_name = new_name.strip()
+        if name == ROOT:
+            raise ValueError("the theorem is always called main")
+        if new_name == name:
+            return
+        if not NAME_RE.match(new_name):
+            raise ValueError(f"not a valid Lean name: {new_name!r} (letters, digits and _)")
+        if new_name in self.goals:
+            raise ValueError(f"{new_name} is already used by another goal")
+        g = self.goals.pop(name)
+        g.name = new_name
+        self.goals[new_name] = g
+        for other in self.goals.values():
+            other.children = [new_name if c == name else c for c in other.children]
+            other.proof = re.sub(rf"(?<![\w.']){re.escape(name)}(?![\w'])", new_name, other.proof)
+        self._log(f"renamed {name} to {new_name}")
+        self._emit_goal(new_name)
 
     def _fill_latex(self, names: list[str]) -> None:
         """Write the missing LaTeX from the Lean, several at a time."""
@@ -338,6 +373,12 @@ class Workspace:
     def prove(self, name: str) -> None:
         """Prove `name`: its open lemmas first (in order), then its own proof."""
         g = self.goals[name]
+        if g.established_by and g.status != "proved":
+            # taken from another project: Lean checks its theorem (once that project is established)
+            self._cite(g)
+            self._log(f"{name}: " + self._cite_outcome(g))
+            self._emit_goal(name)
+            return
         if g.status in ("proved", "assumed") or self.session.stopped:
             return
         for child in g.children:

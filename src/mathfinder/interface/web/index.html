@@ -27,7 +27,7 @@
       <button id="theme-btn" class="icon-btn" title="Switch light / dark" aria-label="Switch light or dark theme"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
     </div>
     <a class="btn new-btn" href="#new"><span aria-hidden="true">+</span> New project</a>
-    <span class="sidebar-label">Projects</span>
+    <input id="project-search" class="project-search" type="search" placeholder="Search projects" aria-label="Search projects">
     <nav id="project-list" class="project-list" aria-label="Your projects"></nav>
     <p class="sidebar-foot">Saved on this computer. A project whose whole proof passed the final check is
       <b>established</b>: other projects can use its theorem as a lemma.</p>
@@ -67,6 +67,10 @@
         <div id="confirm" class="confirm-card hidden">
           <h2>Is this what you mean?</h2>
           <p class="lead">Lean will prove exactly this statement, so check it carefully. You can edit it.</p>
+          <label class="field name-field">
+            <span class="field-label">Project name</span>
+            <input id="project-name" maxlength="80" placeholder="e.g. Sum of odd numbers" spellcheck="false">
+          </label>
           <div class="code-input">
             <span class="kw">theorem</span><span class="name">main</span>
             <input id="statement" spellcheck="false" aria-label="Lean statement">
@@ -89,8 +93,11 @@
     <section id="view-project" class="view project-view hidden">
       <header class="project-head">
         <div class="project-title">
-          <div id="project-title" class="math"></div>
-          <span id="project-status"></span>
+          <div class="name-row">
+            <h1 id="project-name-text" class="project-name" title="Click to rename"></h1>
+            <span id="project-status"></span>
+          </div>
+          <div id="project-title" class="project-statement math"></div>
         </div>
         <div class="project-tools">
           <span id="job" class="job hidden"><span class="spinner"></span><span id="job-text">Working…</span></span>
@@ -130,23 +137,36 @@
           </div>
         </section>
 
+        <div id="divider" class="divider" role="separator" aria-orientation="vertical" aria-label="Drag to resize the chat"
+             title="Drag to resize"></div>
+
         <!-- the proof -->
         <section class="proof-pane" id="proof-pane" aria-label="The proof">
           <div class="proof-tabs">
             <div class="tabs" role="tablist">
               <button id="tab-tree" class="tab active" role="tab">Proof tree</button>
+              <button id="tab-library" class="tab" role="tab">Library</button>
               <button id="tab-final" class="tab" role="tab">Final proof</button>
             </div>
             <nav id="breadcrumb" class="breadcrumb" aria-label="Where you are in the proof"></nav>
           </div>
 
           <div id="pane-tree">
+            <div id="progress" class="progress-card"></div>
             <div id="notes" class="notes hidden"></div>
             <details class="outline-box" open>
               <summary>Outline</summary>
               <ul id="outline" class="outline"></ul>
             </details>
             <div id="focus" class="focus"></div>
+          </div>
+
+          <div id="pane-library" class="hidden">
+            <p class="muted-text library-intro">Your other projects. Plug one in as a lemma of the goal you have
+              open, or use it to prove that goal. An established project is a proved lemma; one that isn't
+              established yet counts as <b>assumed</b> until it is. In the chat, refer to one with <b>@</b>.</p>
+            <input id="library-search" type="search" placeholder="Search your projects" aria-label="Search your projects">
+            <div id="library" class="library"></div>
           </div>
 
           <div id="pane-final" class="hidden">

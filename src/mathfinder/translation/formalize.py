@@ -28,7 +28,9 @@ Rules:
 - Make every assumption explicit as a hypothesis. Do not add assumptions the original doesn't have,
   and do not drop any.
 - Lean 4 syntax and current Mathlib names only. Sums: ∑ i ∈ Finset.range n, f i.
-Reply with ONLY a JSON object inside a ```json block: {"statement": "...", "notes": "..."}"""
+- Also give the theorem a short name a mathematician would use for it, in plain words, at most
+  five words: "Sum of odd numbers", "AM-GM for two numbers", "6 divides n³ − n".
+Reply with ONLY a JSON object inside a ```json block: {"statement": "...", "name": "...", "notes": "..."}"""
 
 SYSTEM_BACK = """You translate Lean 4 + Mathlib statements into LaTeX, LITERALLY.
 Say exactly what the Lean says, including the number types (ℕ, ℤ, ℝ) and every hypothesis.
@@ -50,6 +52,7 @@ class Formalization:
     faithful: bool = False  # the judge's opinion
     judgment: str = ""  # the judge's reason
     errors: list[str] = field(default_factory=list)  # Lean errors, if it never type-checked
+    name: str = ""  # a short name for the theorem, suggested as the project's name
 
     @property
     def ok(self) -> bool:
@@ -76,6 +79,7 @@ def formalize(latex: str) -> Formalization:
     for _ in range(1 + REPAIR_ROUNDS):
         data = llm.complete_json(SYSTEM_FORMALIZE, prompt)
         result.statement = clean_statement(str(data.get("statement", "")))
+        result.name = str(data.get("name", "")).strip()[:80]
         result.errors = statement_errors(result.statement) if result.statement else ["empty statement"]
         if not result.errors:
             break
@@ -89,6 +93,17 @@ def formalize(latex: str) -> Formalization:
     result.back_translation = to_latex("main", result.statement)
     result.faithful, result.judgment = judge(latex, result.back_translation)
     return result
+
+
+SYSTEM_NAME = """You name theorems. Give the short name a mathematician would use for this one, in plain
+words, at most five words: "Sum of odd numbers", "AM-GM for two numbers", "6 divides n³ − n".
+Reply with ONLY a JSON object inside a ```json block: {"name": "..."}"""
+
+
+def suggest_name(theorem: str) -> str:
+    """A short name for a theorem (LaTeX or Lean), for a project that doesn't have one."""
+    answer = llm.complete_json(SYSTEM_NAME, theorem)
+    return str(answer.get("name", "") if isinstance(answer, dict) else "").strip()[:80]
 
 
 def to_latex(name: str, statement: str) -> str:

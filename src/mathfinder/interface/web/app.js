@@ -17,7 +17,6 @@ const state = {
   projectId: null,    // the open project
   project: null,      // {id, title, latex, established, conversation, notes, result}
   library: null,      // established results the open project may cite (loaded when needed)
-  choosing: null,     // the goal for which you are choosing an established result
   ws: null,           // the workspace from the server: {root, goals: {name: goal}, busy}
   focus: "main",      // the goal open in the proof panel (zoomed in on)
   options: {},        // plans the model proposed, per goal: {name: [option, ...]}
@@ -167,8 +166,28 @@ async function loadProjects() {
     return;
   }
   renderProjects();
+  nameUnnamedProjects();
 }
 
+// Projects from before names existed get a suggested name, one at a time, once per visit.
+const naming = new Set();
+async function nameUnnamedProjects() {
+  for (const p of state.projects.filter((x) => x.name === x.title && !naming.has(x.id))) {
+    naming.add(p.id);
+    try {
+      p.name = (await post(`/api/projects/${p.id}/suggest-name`)).name;
+    } catch (e) { continue; }
+    renderProjects();
+    if (p.id === state.projectId) {
+      state.project.name = p.name;
+      showText($("project-name-text"), p.name);
+      render();
+    }
+  }
+}
+
+// Projects in two groups, newest first: the ones you are working on, and the established ones
+// (finished; other projects can use their theorems). The search box filters both.
 function renderProjects() {
   const list = $("project-list");
   list.innerHTML = "";
@@ -176,24 +195,38 @@ function renderProjects() {
     list.append(el("p", "sidebar-empty", "No projects yet. Write a theorem to start one."));
     return;
   }
-  state.projects.forEach((p) => {
-    const item = el("a", "project-item" + (p.id === state.projectId ? " current" : ""));
-    item.href = `#project=${p.id}`;
-    const title = el("span", "project-item-title math");
-    showText(title, p.title);
-    const meta = el("span", "project-item-meta");
-    meta.append(el("i", "dot " + (p.status === "established" ? "proved" : p.status)),
-                document.createTextNode(`${PROJECT_STATUS[p.status] || p.status} · ${timeAgo(p.updated)}`));
-    const remove = button("×", (e) => { e.preventDefault(); deleteProject(p); }, "project-delete");
-    remove.title = "Delete this project";
-    remove.setAttribute("aria-label", "Delete this project");
-    item.append(title, meta, remove);
-    list.append(item);
+  const query = $("project-search").value.trim().toLowerCase();
+  const shown = state.projects.filter((p) => !query || `${p.name} ${p.title} ${p.statement}`.toLowerCase().includes(query));
+  const groups = [["In progress", shown.filter((p) => !p.established)], ["Established", shown.filter((p) => p.established)]];
+  groups.forEach(([label, projects]) => {
+    if (!projects.length) return;
+    list.append(el("span", "sidebar-label", label));
+    projects.forEach((p) => list.append(projectItem(p)));
   });
+  if (!shown.length) list.append(el("p", "sidebar-empty", "No project matches."));
+}
+
+function projectItem(p) {
+  const item = el("a", "project-item" + (p.id === state.projectId ? " current" : ""));
+  item.href = `#project=${p.id}`;
+  const name = el("span", "project-item-name");
+  showText(name, p.name);
+  const meta = el("span", "project-item-meta");
+  meta.append(el("i", "dot " + (p.established ? "proved" : p.status)));
+  const statement = el("span", "project-item-statement math");
+  if (p.name !== p.title) showText(statement, p.title);
+  else statement.textContent = `${PROJECT_STATUS[p.status] || p.status} · ${timeAgo(p.updated)}`;
+  meta.append(statement);
+  const remove = button("×", (e) => { e.preventDefault(); deleteProject(p); }, "project-delete");
+  remove.title = "Delete this project";
+  remove.setAttribute("aria-label", "Delete this project");
+  item.append(name, meta, remove);
+  item.title = `${p.name} · ${PROJECT_STATUS[p.status] || p.status} · changed ${timeAgo(p.updated)}`;
+  return item;
 }
 
 async function deleteProject(p) {
-  if (!confirm(`Delete this project? This cannot be undone.\n\n${p.title}`)) return;
+  if (!confirm(`Delete “${p.name}”? This cannot be undone.`)) return;
   try {
     await request("DELETE", `/api/projects/${p.id}`);
   } catch (e) {
@@ -233,6 +266,7 @@ async function formalize() {
     }
     spinnerText($("formalize-status"), "");
     $("statement").value = f.statement;
+    $("project-name").value = f.name || "";
     showText($("back"), f.back_translation);
     const v = $("verdict");
     v.className = "notice " + (f.faithful ? "ok" : "warn");
@@ -262,7 +296,9 @@ async function checkEdit() {
 async function approve() {
   $("approve-btn").disabled = true;
   try {
-    const project = await post("/api/projects", { statement: $("statement").value, latex: state.latex });
+    const project = await post("/api/projects", {
+      statement: $("statement").value, latex: state.latex, name: $("project-name").value.trim(),
+    });
     $("confirm").classList.add("hidden");
     location.hash = `project=${project.id}`;  // route() opens it
   } catch (e) {
@@ -295,10 +331,11 @@ function openProject(project) {
   closeProject();
   Object.assign(state, {
     projectId: project.id, project, ws: project.workspace, focus: "main", options: {}, editing: null,
-    library: null, choosing: null, shown: new Set(), attempts: 0, agent: project.agent || { state: "idle", step: 0 },
+    library: null, shown: new Set(), attempts: 0, agent: project.agent || { state: "idle", step: 0 },
   });
   showView("project");
   showText($("project-title"), project.title);
+  showText($("project-name-text"), project.name);
   $("messages").innerHTML = "";
   project.conversation.forEach(addLine);
   showResult(project.result);
@@ -352,6 +389,7 @@ function render() {
   renderHead();
   renderAgent();
   renderNotes();
+  renderProgress();
   renderBreadcrumb();
   renderOutline();
   renderFocus();
@@ -359,6 +397,7 @@ function render() {
 
 function renderHead() {
   const busyNow = state.ws.busy;
+  $("project-title").classList.toggle("hidden", state.project.name === state.project.title);
   const root = goal("main");
   const status = state.project.established ? "established" : root.status;
   $("project-status").replaceChildren(statusBadgeFor(status, root));
@@ -368,6 +407,70 @@ function renderHead() {
   $("job-text").textContent = what + (state.attempts ? ` · ${state.attempts} attempts checked` : "") + "…";
   $("stop-btn").classList.toggle("hidden", !busyNow || agentWorking());
   $("finish-btn").disabled = busyNow || root.status !== "proved" || root.assumes.length > 0;
+}
+
+// ---------- progress: how far the proof is, and what to do next ----------
+
+function renderProgress() {
+  const goals = Object.values(state.ws.goals);
+  const proved = goals.filter((g) => g.status === "proved").length;
+  const box = $("progress");
+  box.innerHTML = "";
+  const head = el("div", "progress-head");
+  head.append(el("b", "", `${proved} of ${goals.length} goal${goals.length === 1 ? "" : "s"} proved`));
+  const bar = el("div", "progress-bar");
+  const fill = el("span");
+  fill.style.width = `${Math.round((100 * proved) / goals.length)}%`;
+  bar.append(fill);
+  head.append(bar);
+  box.append(head);
+
+  const [text, label, act] = nextStep(goal("main"));
+  if (!text) return;
+  const next = el("div", "next-step");
+  next.append(el("span", "", text));
+  if (label) {
+    const b = button(label, act, "btn tiny primary");
+    b.disabled = state.ws.busy || agentWorking();
+    next.append(b);
+  }
+  box.append(next);
+}
+
+// The most useful thing to do now, as [sentence, button label, what the button does].
+function nextStep(root) {
+  if (state.ws.busy || agentWorking()) return ["Working… you can keep chatting, or press Esc to stop.", "", null];
+  if (state.project.established) return ["Established. Other projects can use this theorem as a lemma.", "", null];
+  const assumed = root.assumes || [];
+  if (root.status === "proved" && !assumed.length) {
+    return ["Proved. Run the final check of the whole proof.", "Check whole proof", finishProof];
+  }
+  if (root.status === "proved") {
+    return [`Proved, assuming ${assumed.join(", ")}. Prove ${assumed.length === 1 ? "it" : "them"} to finish.`,
+            `Open ${assumed[0]}`, () => zoom(assumed[0])];
+  }
+  if (!root.children.length && !root.attempts.length) {
+    return ["Start with a plan, or prove it directly. Or tell the assistant what to try.", "Suggest plans",
+            () => { zoom("main"); suggestFor("main"); }];
+  }
+  const order = [...pathOrder()];
+  const stuck = order.find((n) => ["stuck", "refuted"].includes(goal(n).status));
+  if (stuck) {
+    const label = stuck === "main" ? "The theorem" : stuck;
+    return [`${label} is stuck. See what Lean said, change the plan, or ask the assistant.`, `Open ${stuck}`, () => zoom(stuck)];
+  }
+  const open = order.find((n) => goal(n).status === "open");
+  if (open) {
+    return [`Next: prove ${open === "main" ? "the theorem" : open}.`, `Prove ${open === "main" ? "it" : open}`,
+            () => attempt(goalAction(open, "prove"))];
+  }
+  return ["", "", null];
+}
+
+// Every goal, lemmas before the goals that use them (the order they get proved in).
+function* pathOrder(name = "main") {
+  for (const child of goal(name).children) yield* pathOrder(child);
+  yield name;
 }
 
 function statusBadgeFor(status, g) {
@@ -583,6 +686,8 @@ async function runCommand(line) {
 
 function showCommands() {
   const text = $("chat-input").value;
+  const mention = text.match(/@([^@\[\]]*)$/);  // "@" and what you typed after it so far
+  if (mention) return showMentions(mention[1]);
   const menu = $("commands");
   if (!text.startsWith("/") || text.includes(" ")) return hideCommands();
   const matches = COMMANDS.filter((c) => c.name.startsWith(text));
@@ -594,6 +699,29 @@ function showCommands() {
       hideCommands();
     }, "command");
     item.append(el("b", "", c.name), el("span", "args", c.args), el("span", "help", c.help));
+    menu.append(item);
+  });
+  menu.classList.toggle("hidden", !matches.length);
+}
+
+// "@" in the chat: pick one of your other projects. It goes in as @[name], and the assistant
+// knows which project that is (it gets the list of your projects with their names).
+async function showMentions(typed) {
+  const menu = $("commands");
+  const results = (await attempt(loadLibrary())) || [];
+  const query = typed.trim().toLowerCase();
+  const matches = results.filter((r) => r.name.toLowerCase().includes(query)).slice(0, 6);
+  menu.innerHTML = "";
+  matches.forEach((r) => {
+    const item = button("", () => {
+      const input = $("chat-input");
+      input.value = input.value.replace(/@([^@\[\]]*)$/, `@[${r.name}] `);
+      input.focus();
+      hideCommands();
+    }, "command mention");
+    const name = el("span", "help");
+    showText(name, r.name);
+    item.append(el("b", "", "@"), name, el("span", "args", r.established ? "established" : "not established"));
     menu.append(item);
   });
   menu.classList.toggle("hidden", !matches.length);
@@ -613,10 +741,14 @@ function showSide(name) {
 // ---------- the proof panel ----------
 
 function showProofTab(name) {
-  $("tab-tree").classList.toggle("active", name === "tree");
-  $("tab-final").classList.toggle("active", name === "final");
-  $("pane-tree").classList.toggle("hidden", name !== "tree");
-  $("pane-final").classList.toggle("hidden", name !== "final");
+  ["tree", "library", "final"].forEach((tab) => {
+    $(`tab-${tab}`).classList.toggle("active", tab === name);
+    $(`pane-${tab}`).classList.toggle("hidden", tab !== name);
+  });
+  if (name === "library") {
+    state.library = null;  // load it fresh: other projects may have changed
+    renderLibrary();
+  }
   $("breadcrumb").classList.toggle("hidden", name !== "tree");
 }
 
@@ -720,7 +852,9 @@ function renderFocus() {
   // --- heading
   const head = el("div", "goal-head");
   head.append(el("span", "kicker", g.name === "main" ? "Theorem" : "Lemma"));
-  head.append(el("span", "goal-name", g.name), statusBadge(g));
+  const goalName = el("span", "goal-name", g.name);
+  head.append(goalName, statusBadge(g));
+  if (g.name !== "main" && !busyNow) head.append(button("Rename", () => renameGoal(g, goalName), "btn tiny"));
   const path = pathTo(g.name);
   if (path.length > 1) {
     const parent = path[path.length - 2];
@@ -759,14 +893,13 @@ function renderFocus() {
   const auto = button("Let the search find a proof", () => attempt(goalAction(g.name, "auto")));
   const assumeLabel = g.status === "assumed" ? "Stop assuming it" : "Assume it for now";
   const assume = button(assumeLabel, () => applyWorkspace(goalAction(g.name, "assume", { on: g.status !== "assumed" })));
-  const cite = button("Use an established result", () => chooseEstablished(g.name));
+  const cite = button("Use a previous result", () => showProofTab("library"));
   [prove, auto, assume, cite].forEach((b) => { b.disabled = busyNow; });
   if (g.status === "proved") prove.disabled = auto.disabled = cite.disabled = true;
   if (g.name === "main" || g.status === "proved") assume.disabled = true;
   actions.append(prove, auto, assume);
   if (g.name !== "main") actions.append(cite);
   box.append(actions);
-  if (state.choosing === g.name) box.append(libraryChooser(g));
 
   // --- the plan
   box.append(state.editing && state.editing.goal === g.name ? planEditor(g) : planSection(g, busyNow));
@@ -782,6 +915,7 @@ function planSection(g, busyNow) {
   const buttons = el("div", "goal-actions");
   buttons.style.marginTop = "0";
   const suggest = button(g.children.length ? "Suggest other plans" : "Suggest plans", () => suggestPlans(g, suggest), "btn tiny");
+  suggest.dataset.suggest = g.name;
   const edit = button(g.children.length ? "Edit plan" : "Write a plan", () => startEditing(g), "btn tiny");
   const remove = button("Remove plan", () => applyWorkspace(goalAction(g.name, "clear-plan")), "btn tiny danger");
   [suggest, edit, remove].forEach((b) => { b.disabled = busyNow || g.status === "proved"; });
@@ -948,18 +1082,18 @@ function planEditor(g) {
   }, "btn tiny"));
   const fromLibrary = el("div", "goal-actions");
   fromLibrary.style.marginTop = "0";
-  fromLibrary.append(button("+ Add an established result", async () => {
+  fromLibrary.append(button("+ Add a result from another project", async () => {
     const results = await attempt(loadLibrary());
     if (!results) return;
     if (!results.length) {
-      notice("No established results yet: finish a project first.", "error");
+      notice("No other projects yet.", "error");
       return;
     }
     const pick = el("select");
-    results.forEach((r) => pick.append(new Option(`${r.title}   [${r.statement}]`, r.id)));
+    results.forEach((r) => pick.append(new Option(`${r.name}${r.established ? "" : " (not established yet)"}`, r.id)));
     const add = button("Add", () => {
       const r = results.find((x) => x.id === pick.value);
-      draft.lemmas.push({ name: `cited_${r.id}`, lean: r.statement, latex: r.latex, established_by: r.id });
+      draft.lemmas.push({ name: lemmaNameFor(r), lean: r.statement, latex: r.latex, established_by: r.id });
       render();
     }, "btn tiny primary");
     fromLibrary.replaceChildren(pick, add);
@@ -1047,48 +1181,144 @@ async function loadLibrary() {
   return state.library;
 }
 
+function projectName(id) {
+  const p = (state.library || []).find((x) => x.id === id) || state.projects.find((x) => x.id === id);
+  return p ? p.name : "another project";
+}
+
 function citedNote(g) {
-  const note = el("div", "cited", "✓ Established in another project · ");
-  const link = el("a", "", "open that project");
+  const established = g.status === "proved";
+  const note = el("div", "cited" + (established ? "" : " pending"));
+  note.append(document.createTextNode(established ? "✓ From the established project " : "From the project "));
+  const link = el("a", "", `“${projectName(g.established_by)}”`);
   link.href = `#project=${g.established_by}`;
   note.append(link);
+  if (!established) note.append(document.createTextNode(", assumed until that project is established"));
   return note;
 }
 
-async function chooseEstablished(goalName) {
-  state.choosing = state.choosing === goalName ? null : goalName;
-  if (state.choosing) await attempt(loadLibrary());
-  render();
+// A Lean name for a lemma taken from a project: its name in snake_case, not yet used here.
+function lemmaNameFor(project) {
+  let base = project.name.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 32);
+  if (!base || /^[0-9]/.test(base)) base = "from_" + (base || project.id);
+  let candidate = base;
+  for (let i = 2; state.ws.goals[candidate]; i++) candidate = `${base}_${i}`;
+  return candidate;
 }
 
-function libraryChooser(g) {
-  const box = el("div", "section");
-  const head = el("div", "section-head");
-  head.append(el("h3", "", "Established results you can use"));
-  head.append(button("Close", () => { state.choosing = null; render(); }, "btn tiny"));
-  box.append(head);
-  const results = state.library || [];
-  if (!results.length) {
-    box.append(el("p", "muted-text", "No established results yet. A project becomes established when its whole proof " +
-      "passes the final check (the “Check whole proof” button)."));
-    return box;
+async function renderLibrary() {
+  const box = $("library");
+  let results;
+  try {
+    results = await loadLibrary();
+  } catch (e) {
+    box.replaceChildren(el("p", "muted-text", "Couldn't load your projects: " + e.message));
+    return;
   }
-  box.append(el("p", "muted-text", "Lean checks that the result really proves this goal. Its statement must match " +
-    "(hypotheses may be filled in from the goal's own assumptions)."));
-  const list = el("div", "library");
-  results.forEach((r) => {
-    const item = el("div", "library-item");
-    const title = el("div", "math");
-    showText(title, r.latex || r.title);
-    item.append(title, el("div", "lemma-lean", `${r.theorem} ${r.statement}`));
-    item.append(button("Use it", async () => {
-      state.choosing = null;
-      await applyWorkspace(goalAction(g.name, "use-established", { project: r.id }));
-    }, "btn tiny primary"));
-    list.append(item);
+  box.innerHTML = "";
+  const query = $("library-search").value.trim().toLowerCase();
+  const shown = results.filter((r) => !query || `${r.name} ${r.title} ${r.statement}`.toLowerCase().includes(query));
+  if (!shown.length) {
+    box.append(el("p", "muted-text", results.length ? "No project matches." :
+      "No other projects yet. Every theorem you work on becomes one, and can then be used here."));
+    return;
+  }
+  const target = goal(state.focus);
+  const targetLabel = target.name === "main" ? "the theorem" : target.name;
+  box.append(el("p", "library-target", `Using them for: ${targetLabel} (open another goal in the proof tree to change this)`));
+  shown.forEach((r) => {
+    const card = el("div", "library-item" + (r.established ? " established" : ""));
+    const head = el("div", "library-head");
+    const name = el("b");
+    showText(name, r.name);
+    head.append(name, el("span", "badge " + (r.established ? "established" : "assumed"),
+                          r.established ? "established" : "not established yet"));
+    const statement = el("div", "math");
+    showText(statement, r.latex || r.title);
+    const lean = el("div", "lemma-lean", r.statement);
+    const buttons = el("div", "lemma-buttons");
+    const add = button(`Add as a lemma of ${targetLabel}`, () => addFromLibrary(target, r), "btn tiny primary");
+    const prove = button(`Prove ${targetLabel} with it`,
+      () => applyWorkspace(goalAction(target.name, "use-established", { project: r.id })), "btn tiny");
+    add.disabled = prove.disabled = state.ws.busy || target.status === "proved";
+    prove.title = "When it states exactly this goal (its hypotheses may come from the goal's own)";
+    buttons.append(add, prove);
+    card.append(head, statement, lean, buttons);
+    box.append(card);
   });
-  box.append(list);
-  return box;
+}
+
+// Put a project's theorem into the plan of `g` as one more lemma (keeping the plan's other lemmas).
+async function addFromLibrary(g, project) {
+  const lemmas = g.children.map((n) => ({
+    name: n, lean: goal(n).lean, latex: goal(n).latex, established_by: goal(n).established_by,
+  }));
+  const name = lemmaNameFor(project);
+  lemmas.push({ name, lean: project.statement, latex: project.latex || "", established_by: project.id });
+  if (await usePlan(g, { sketch: g.sketch, main_proof: g.proof, lemmas })) {
+    notice(`Added “${project.name}” as the lemma ${name} of ${g.name === "main" ? "the theorem" : g.name}.` +
+      (g.proof ? "" : " Now say how the lemmas prove it: Edit plan, or ask the assistant."));
+    showProofTab("tree");
+  }
+}
+
+function renameGoal(g, nameNode) {
+  const input = el("input", "rename-input");
+  input.value = g.name;
+  let done = false;
+  const save = async () => {
+    if (done) return;
+    done = true;
+    const newName = input.value.trim();
+    if (newName && newName !== g.name) {
+      const answer = await attempt(goalAction(g.name, "rename", { new_name: newName }));
+      if (answer) {
+        state.ws = answer.workspace;
+        state.focus = newName;
+      }
+    }
+    render();
+  };
+  input.onkeydown = (e) => {
+    if (e.key === "Enter") save();
+    if (e.key === "Escape") { e.stopPropagation(); input.value = g.name; save(); }
+  };
+  input.onblur = save;
+  nameNode.replaceWith(input);
+  input.select();
+}
+
+function renameProject() {
+  const heading = $("project-name-text");
+  const input = el("input", "rename-input project-rename");
+  input.value = state.project.name === state.project.title ? "" : state.project.name;
+  input.placeholder = "Name this project";
+  let done = false;
+  const save = async () => {
+    if (done) return;
+    done = true;
+    const name = input.value.trim();
+    if (name && name !== state.project.name) {
+      const answer = await attempt(request("PATCH", `/api/projects/${state.projectId}`, { name }));
+      if (answer) state.project.name = answer.name;
+    }
+    input.replaceWith(heading);
+    showText(heading, state.project.name);
+    render();
+    loadProjects();
+  };
+  input.onkeydown = (e) => {
+    if (e.key === "Enter") save();
+    if (e.key === "Escape") { e.stopPropagation(); input.value = ""; save(); }
+  };
+  input.onblur = save;
+  heading.replaceWith(input);
+  input.focus();
+}
+
+function suggestFor(name) {
+  const b = document.querySelector(`[data-suggest="${name}"]`);
+  if (b) b.click();
 }
 
 // ---------- the final proof ----------
@@ -1120,6 +1350,28 @@ async function copyProof() {
     $("copy-btn").textContent = "Select and copy";
   }
   setTimeout(() => { $("copy-btn").textContent = "Copy"; }, 1500);
+}
+
+// ---------- the divider between the chat and the proof: drag it to give either more room ----------
+
+function setUpDivider() {
+  const split = $("split");
+  const apply = (fraction) => split.style.setProperty("--chat-fraction", Math.min(0.7, Math.max(0.25, fraction)));
+  try { apply(Number(localStorage.getItem("mf-chat-fraction")) || 0.42); } catch (e) { apply(0.42); }
+  $("divider").addEventListener("pointerdown", (down) => {
+    down.preventDefault();
+    const box = split.getBoundingClientRect();
+    const move = (e) => apply((e.clientX - box.left) / box.width);
+    const up = () => {
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", up);
+      document.body.classList.remove("resizing");
+      try { localStorage.setItem("mf-chat-fraction", split.style.getPropertyValue("--chat-fraction")); } catch (e) { /* blocked */ }
+    };
+    document.body.classList.add("resizing");
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", up);
+  });
 }
 
 // ---------- wire up the buttons ----------
@@ -1159,6 +1411,11 @@ window.addEventListener("DOMContentLoaded", () => {
   $("show-chat").onclick = () => showSide("chat");
   $("show-proof").onclick = () => showSide("proof");
   $("tab-tree").onclick = () => showProofTab("tree");
+  $("tab-library").onclick = () => showProofTab("library");
+  $("library-search").addEventListener("input", renderLibrary);
+  $("project-search").addEventListener("input", renderProjects);
+  $("project-name-text").onclick = renameProject;
+  setUpDivider();
   $("tab-final").onclick = () => showProofTab("final");
   $("stop-btn").onclick = stopAll;
   $("finish-btn").onclick = finishProof;

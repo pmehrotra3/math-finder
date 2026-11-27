@@ -12,8 +12,10 @@ any mistake. Math Finder combines them: the AI (Claude) has the ideas, and a pro
 
 ## Working with it
 
-Math Finder is laid out like a chat app. Your projects are on the left. Every theorem is a **project**, saved on
-your computer, and each one is its own space: **a chat on one side, the proof on the other.**
+Math Finder is laid out like a chat app. Your projects are on the left, under the names you give them (a name is
+suggested; click it to change it), split into the ones in progress and the established ones. Every theorem is a
+**project**, saved on your computer, and each one is its own space: **a chat on one side, the proof on the other**
+(drag the line between them to make either wider). Above the proof, a progress bar and the obvious next step.
 
 1. **Write** the theorem in LaTeX (*New project*), for example *for every integer n, 6 divides n³ − n*.
 2. **Confirm** the Lean version. It is translated back into LaTeX without seeing your text, so you can check
@@ -43,10 +45,17 @@ your computer, and each one is its own space: **a chat on one side, the proof on
 
 ### Building on earlier projects
 
-A project whose proof passed the final check is **established**: in any other project you can use its theorem as a
-lemma. Lean still checks everything. The established project's verified code is included in the new proof, in a
-namespace of its own, and the lemma is proved by applying that project's theorem. Projects that cite each other in
-a circle are refused, and a project can't be deleted while another one cites it.
+Any earlier project can be plugged into a new one. In the proof panel's **Library** tab, add a project's theorem as
+a lemma of the goal you have open (it gets a name from the project, which you can change), or use it to prove that
+goal. In the chat, refer to a project with **@** and the assistant can do the same.
+
+Lean still checks everything. A project whose proof passed the final check is **established**: its verified code is
+included in the new proof, in a namespace of its own, and the lemma is proved by applying that project's theorem.
+A project that isn't established yet can be plugged in too; it counts as *assumed* until it is established, and
+then proving the lemma cites it. Projects that use each other in a circle are refused, and a project can't be
+deleted while another one uses it.
+
+Lemmas can be renamed at any time (*Rename* next to a lemma's name), and every proof that uses one follows along.
 
 The command line (`mathfinder prove`) runs the same steps automatically, without the workspace or projects.
 

@@ -10,7 +10,9 @@ WORKSPACE: the theorem and the tree of lemmas you build with the assistant (prov
   POST   /api/projects                 {statement, latex} → a new project
   GET    /api/projects/{id}                          → one project: workspace, conversation, result
   DELETE /api/projects/{id}                          → delete it (not while others cite it)
-  GET    /api/projects/{id}/library                  → established results this project may cite
+  PATCH  /api/projects/{id}             {name}        → rename it
+  POST   /api/projects/{id}/suggest-name             → a suggested name, if it has none
+  GET    /api/projects/{id}/library                  → the other projects it may use as lemmas
 
   POST   /api/projects/{id}/goals/{name}/{action}    → see GOAL_ACTIONS below
   POST   /api/projects/{id}/stop                     → stop the running job and the assistant
@@ -56,6 +58,11 @@ class CheckRequest(BaseModel):
 class NewProject(BaseModel):
     statement: str  # the approved Lean statement
     latex: str = ""  # the theorem as you wrote it
+    name: str = ""  # a short name for the project
+
+
+class ProjectChange(BaseModel):
+    name: str
 
 
 class LemmaInPlan(BaseModel):
@@ -73,6 +80,7 @@ class GoalRequest(BaseModel):
     lean: str = ""  # statement
     on: bool = True  # assume
     project: str = ""  # use-established
+    new_name: str = ""  # rename
 
 
 class ChatMessage(BaseModel):
@@ -120,7 +128,7 @@ def list_projects() -> dict:
 
 @app.post("/api/projects")
 def new_project(req: NewProject) -> dict:
-    project = STORE.create(req.statement, req.latex)
+    project = STORE.create(req.statement, req.latex, req.name)
     opened = live(project.id)
     opened.save()
     return opened.view()
@@ -129,6 +137,25 @@ def new_project(req: NewProject) -> dict:
 @app.get("/api/projects/{project_id}")
 def open_project(project_id: str) -> dict:
     return live(project_id).view()
+
+
+@app.patch("/api/projects/{project_id}")
+def change_project(project_id: str, req: ProjectChange) -> dict:
+    """Rename a project."""
+    opened = live(project_id)
+    opened.project.name = req.name.strip()[:80]
+    opened.save()
+    return {"name": opened.project.name or opened.project.title}
+
+
+@app.post("/api/projects/{project_id}/suggest-name")
+def suggest_name(project_id: str) -> dict:
+    """Give a project without a name a suggested one (projects made before names existed)."""
+    opened = live(project_id)
+    if not opened.project.name:
+        opened.project.name = formalizer.suggest_name(opened.project.latex or opened.project.statement)
+        opened.save()
+    return {"name": opened.project.name or opened.project.title}
 
 
 @app.delete("/api/projects/{project_id}")
@@ -150,7 +177,7 @@ def library(project_id: str) -> dict:
     return {"results": STORE.library(excluding=project_id)}
 
 
-GOAL_ACTIONS = {"propose", "plan", "clear-plan", "statement", "assume", "use-established", "prove", "auto"}
+GOAL_ACTIONS = {"propose", "plan", "clear-plan", "statement", "rename", "assume", "use-established", "prove", "auto"}
 
 
 @app.post("/api/projects/{project_id}/goals/{name}/{action}")
@@ -180,6 +207,8 @@ def goal_action(project_id: str, name: str, action: str, req: GoalRequest) -> di
             ws.clear_plan(name)
         elif action == "statement":
             return {"errors": ws.edit_statement(name, req.lean), "workspace": ws.to_dict()}
+        elif action == "rename":
+            ws.rename(name, req.new_name)
         elif action == "assume":
             ws.assume(name, req.on)
         elif action == "use-established":

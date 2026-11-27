@@ -22,6 +22,7 @@ The actions it may take are the ones the proof panel's buttons offer, plus `try_
                               give a goal a plan; Lean checks that it fits together
   clear_plan {goal}           forget a goal's plan, to prove it directly
   statement {goal, lean}      change a lemma's Lean statement
+  rename {goal, name}         give a lemma a better name
   assume {goal, on}           assume a lemma for now (or stop assuming it)
   cite {goal, project}        prove a goal with an established project's theorem
   finish                      run the final Lean check of the whole proof
@@ -63,9 +64,11 @@ The actions, carried out in order:
   {"do": "plan", "goal": "name", "sketch": "idea in one sentence",
    "lemmas": [{"name": "step_one", "lean": "(n : ℤ) : 2 ∣ n * (n + 1)"}],
    "main_proof": "Lean tactics that prove the goal from the lemmas"}
-        replace a goal's plan; Lean checks at once that it fits together
+        replace a goal's plan; Lean checks at once that it fits together. A lemma that is
+        another project's theorem gets "project": its id (its "lean" must be that statement).
   {"do": "clear_plan", "goal": "name"}               forget a goal's plan
   {"do": "statement", "goal": "name", "lean": "..."} change a lemma's statement (not main's)
+  {"do": "rename", "goal": "name", "name": "new_name"} give a lemma a clearer name
   {"do": "assume", "goal": "name", "on": true}       assume a lemma for now (on: false to undo)
   {"do": "cite", "goal": "name", "project": "id"}    prove a goal with an established result
   {"do": "note", "text": "..."}                      a hint every later plan and proof attempt sees
@@ -81,6 +84,7 @@ Rules:
 - A Lean statement is what follows `theorem name`, e.g. "(a b : ℝ) : a ^ 2 + b ^ 2 ≥ 2 * a * b".
   Lemma names are Lean identifiers (letters, digits, _), different from every other goal.
 - In a main proof, use a lemma by name with its arguments: `nlinarith [step_one a b]`.
+- Give lemmas names that say what they are: `sq_nonneg_diff`, `even_case`, not `step_1`.
 - While a job is running, other changes have to wait: use "stop" first to change course, or
   "wait". Only one of prove, search and finish can start in a step: put it last.
 - When Lean rejects something, read its error and fix the cause; don't retry the same thing.
@@ -90,7 +94,7 @@ Rules:
 HISTORY = 30  # recent chat lines to include
 ACTIONS = {
     "stop", "wait", "note", "clear_notes", "try_proof", "prove", "search", "plan", "clear_plan",
-    "statement", "assume", "cite", "finish",
+    "statement", "rename", "assume", "cite", "finish",
 }  # fmt: skip
 
 

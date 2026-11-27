@@ -38,6 +38,7 @@ class Live:
             project.latex,
             on_event=self.on_event,
             library_code=store.lean_code_for,
+            is_established=store.is_established,
             goals=project.goals or None,
             notes=project.notes,
         )
@@ -87,6 +88,7 @@ class Live:
         p = self.project
         return {
             "id": p.id,
+            "name": p.name or p.title,
             "title": p.title,
             "latex": p.latex,
             "established": p.established,
@@ -173,11 +175,12 @@ class Live:
         self.workspace.session.stop()
 
     def check_citations(self, cited: list[str]) -> None:
-        """A project may cite only established projects, never itself, never one that cites it."""
+        """A project may use any other project's theorem, but never its own, and never one of a
+        project that uses it (that would be circular)."""
         allowed = {result["id"] for result in self.store.library(excluding=self.project.id)}
         for pid in cited:
             if pid and pid not in allowed:
-                raise ValueError(f"project {pid} is not an established result this project can use")
+                raise ValueError(f"project {pid} is not one this project can use (it would be circular)")
 
     # ---------- the chat and the assistant ----------
 
@@ -260,8 +263,14 @@ class Live:
         library = self.store.library(excluding=self.project.id)
         if library:
             parts.append(
-                "Established results from other projects (cite with their id):\n"
-                + "\n".join(f"- id {r['id']}: {r['statement']}" for r in library)
+                "The mathematician's other projects; their theorems can be used as lemmas. They may refer\n"
+                'to one as @[name]. Use one with cite, or as a plan lemma with "project": id. One that\n'
+                "isn't established yet counts as assumed until it is.\n"
+                + "\n".join(
+                    f"- @[{r['name']}] id {r['id']} ({'established' if r['established'] else 'not established yet'})"
+                    f": {r['statement']}"
+                    for r in library
+                )
             )
         return "\n\n".join(parts)
 
@@ -326,12 +335,20 @@ class Live:
         if do == "search":
             return self.start_after_reply(lambda: ws.auto(goal), f"started the search for {goal}")
         if do == "plan":
-            lemmas = [{"name": str(lem["name"]), "lean": str(lem["lean"])} for lem in a.get("lemmas", [])]
+            lemmas = [
+                {"name": str(lem["name"]), "lean": str(lem["lean"]), "established_by": str(lem.get("project", ""))}
+                for lem in a.get("lemmas", [])
+            ]
+            self.check_citations([lem["established_by"] for lem in lemmas])
             problems = ws.set_plan(goal, str(a.get("sketch", "")), str(a.get("main_proof", "")), lemmas)
             self.save()
             if problems:
                 return False, f"new plan for {goal} saved, but it doesn't fit together yet: {problems[0][:300]}"
             return True, f"new plan for {goal} with {len(lemmas)} lemmas; Lean says it fits together"
+        if do == "rename":
+            ws.rename(goal, str(a["name"]))
+            self.save()
+            return True, f"renamed {goal} to {a['name']}"
         if do == "clear_plan":
             ws.clear_plan(goal)
             self.save()
